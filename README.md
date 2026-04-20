@@ -852,9 +852,6 @@ class UltimateShipAnalyzer(QMainWindow):
 
             # 1D 추출용 translate (code 2 방식: 로컬 변수)
             c1102 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_1102_raw]
-            c157 = [affinity.translate(l, yoff=-thickness_y_min) for l in
-                    [shift(ls) for ls in []] if False else self.lines_157]  # 이미 translate됨
-            # 실제로는 self.lines_157이 이미 translate되었으므로 그대로 사용
             c157 = list(self.lines_157)
             c1102 = list(self.lines_1102)
             l1999s = [affinity.translate(l, yoff=-thickness_y_min) for l in self.left_1999_segments]
