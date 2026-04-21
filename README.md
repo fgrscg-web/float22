@@ -35,7 +35,77 @@ rcParams['axes.unicode_minus'] = False
 
 
 # =========================================================================
-# [code 2] 폐단면 검출 디버깅 다이얼로그
+# [디버깅 팝업] 1. 종골재 사전 필터링 확인창
+# =========================================================================
+class StiffenerFilterDialog(QDialog):
+    def __init__(self, raw_lines, filtered_lines, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("디버깅 1: 보강재 사전 필터링 (20mm 이하 및 중첩 제거)")
+        self.resize(800, 600)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("<b>[가이드]</b> 회색: 원본 CAD 선분 / <font color='blue'><b>파란색: 필터링 후 생존한 선분</b></font>"))
+        fig = Figure()
+        canvas = FigureCanvas(fig)
+        layout.addWidget(NavigationToolbar(canvas, self))
+        layout.addWidget(canvas, stretch=1)
+        ax = fig.add_subplot(111)
+        ax.set_aspect('equal')
+        ax.grid(True, linestyle=':', alpha=0.6)
+        
+        for l in raw_lines: ax.plot(*l.xy, color='lightgray', lw=3)
+        for l in filtered_lines: ax.plot(*l.xy, color='blue', lw=1.5)
+        canvas.draw()
+
+
+# =========================================================================
+# [디버깅 팝업] 2. 종골재 중심선 도출 확인창
+# =========================================================================
+class StiffenerCenterlineDialog(QDialog):
+    def __init__(self, filtered_lines, centerlines, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("디버깅 2: 보강재 중심선(Centerline) 도출")
+        self.resize(800, 600)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("<b>[가이드]</b> 파란색: 필터링된 윤곽선 / <font color='red'><b>빨간색: 짝을 맞춰 추출된 1D 중심선</b></font>"))
+        fig = Figure()
+        canvas = FigureCanvas(fig)
+        layout.addWidget(NavigationToolbar(canvas, self))
+        layout.addWidget(canvas, stretch=1)
+        ax = fig.add_subplot(111)
+        ax.set_aspect('equal')
+        ax.grid(True, linestyle=':', alpha=0.6)
+        
+        for l in filtered_lines: ax.plot(*l.xy, color='blue', lw=1, alpha=0.5)
+        for cl in centerlines: ax.plot(*cl['line'].xy, color='red', lw=2)
+        canvas.draw()
+
+
+# =========================================================================
+# [디버깅 팝업] 3. L/T 조인트 간극 치유(Raycast & Merge) 확인창
+# =========================================================================
+class StiffenerHealDialog(QDialog):
+    def __init__(self, hull_cl, raw_cl, healed_cl, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("디버깅 3: 열린 노드 레이캐스팅 및 간극 치유")
+        self.resize(900, 700)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("<b>[가이드]</b> 연한 회색: 선체 외판 / <font color='orange'><b>주황 점선: 치유 전 중심선</b></font> / <font color='green'><b>초록 실선: 교차점까지 연장(Healing)된 최종 보강재</b></font>"))
+        fig = Figure()
+        canvas = FigureCanvas(fig)
+        layout.addWidget(NavigationToolbar(canvas, self))
+        layout.addWidget(canvas, stretch=1)
+        ax = fig.add_subplot(111)
+        ax.set_aspect('equal')
+        ax.grid(True, linestyle=':', alpha=0.6)
+        
+        for cl in hull_cl: ax.plot(*cl['line'].xy, color='lightgray', lw=2)
+        for cl in raw_cl: ax.plot(*cl['line'].xy, color='orange', lw=2, linestyle='--', alpha=0.7)
+        for cl in healed_cl: ax.plot(*cl['line'].xy, color='green', lw=2)
+        canvas.draw()
+
+
+# =========================================================================
+# [code 2] 폐단면 검출 디버깅 다이얼로그 (유지)
 # =========================================================================
 class LoopViewerDialog(QDialog):
     def __init__(self, centerlines, loops, parent=None):
@@ -132,7 +202,7 @@ class UltimateShipAnalyzer(QMainWindow):
         self.debug_dialogs.clear()
 
     # =====================================================================
-    # [code 1] UI 구성 (엄격 유지)
+    # UI 구성 (엄격 유지)
     # =====================================================================
     def init_ui(self):
         main_scroll = QScrollArea()
@@ -302,12 +372,11 @@ class UltimateShipAnalyzer(QMainWindow):
         main_scroll.setWidget(main_container)
         self.setCentralWidget(main_scroll)
 
-    # [code 1] 콤보박스 연동
     def on_section_changed(self, text):
         self.combo_hull.setEnabled(text == "Discontinuous")
 
     # =====================================================================
-    # [code 1] DXF 유틸리티
+    # DXF 유틸리티
     # =====================================================================
     def _extract_pts(self, e, scale):
         try:
@@ -320,7 +389,6 @@ class UltimateShipAnalyzer(QMainWindow):
             return None
         return None
 
-    # [code 1] 외판 두께 폴리곤 생성
     def generate_outward_thickness(self, line, thickness):
         try:
             coords = list(line.coords)
@@ -339,7 +407,6 @@ class UltimateShipAnalyzer(QMainWindow):
         except:
             return line.buffer(thickness / 2.0)
 
-    # [code 1] 내부 부재 폴리곤 생성
     def apply_original_algorithm(self, target_lines, shell_lines, ext, perp, max_a):
         if not target_lines: return []
         raw_lines = target_lines + shell_lines
@@ -382,7 +449,6 @@ class UltimateShipAnalyzer(QMainWindow):
         c_polys = sorted(list(polygonize(f_net)), key=lambda p: p.area, reverse=True)
         return [p for p in c_polys if p.area < max_a]
 
-    # [code 2] -1102 collinear healing
     def heal_1102_collinear(self, lines, threshold_gap=150.0):
         if not lines: return []
         bridges = []
@@ -413,7 +479,6 @@ class UltimateShipAnalyzer(QMainWindow):
                     bridges.append(LineString([tuple(pe), tuple(pn)]))
         return lines + bridges
 
-    # [code 2] 1999 collinear healing
     def heal_1999_collinear(self, line_infos, threshold_gap=500.0):
         if not line_infos: return []
         bridges = []
@@ -449,9 +514,6 @@ class UltimateShipAnalyzer(QMainWindow):
                     })
         return line_infos + bridges
 
-    # =====================================================================
-    # [code 1] DXF 로딩 (엄격 유지 - 6001/7001/9001 포함)
-    # =====================================================================
     def load_and_process_dxf(self):
         if self.is_processing: return
         fname, _ = QFileDialog.getOpenFileName(self, 'Select DXF File', '', 'DXF files (*.dxf)')
@@ -510,7 +572,7 @@ class UltimateShipAnalyzer(QMainWindow):
                                              key=lambda s: (-round(s.centroid.y, 2), s.centroid.x))
 
             self.lines_1102 = [shift(ls) for ls in t_layers["-1102"]]
-            self.lines_1102_raw = list(self.lines_1102)  # 원본 보관
+            self.lines_1102_raw = list(self.lines_1102)
             self.lines_157 = [shift(ls) for ls in t_layers["157"]]
             self.lines_6001 = [shift(ls) for ls in t_layers["6001"]]
             self.lines_7001 = [shift(ls) for ls in t_layers["7001"]]
@@ -522,7 +584,7 @@ class UltimateShipAnalyzer(QMainWindow):
             self.result_box.setText(f"❌ Load Error Detailed:\n{traceback.format_exc()}")
 
     # =====================================================================
-    # 메인 계산: [code 1] 폴리곤+이너시아 → [code 2] 1D 추출+폐루프
+    # 메인 계산
     # =====================================================================
     def calculate_total_inertia(self):
         if self.is_processing: return
@@ -538,7 +600,7 @@ class UltimateShipAnalyzer(QMainWindow):
         QApplication.processEvents()
 
         # =============================================================
-        # [code 2] 1D 추출 헬퍼 함수들 (성실히 유지)
+        # 1D 추출 헬퍼 함수들
         # =============================================================
         def filter_short(lines, ml=100.0):
             return [l for l in lines if l.length >= ml]
@@ -817,7 +879,7 @@ class UltimateShipAnalyzer(QMainWindow):
 
         try:
             # =============================================================
-            # [code 1] 폴리곤 검출 + 이너시아 계산 (엄격 유지)
+            # 폴리곤 생성 및 2D 이너시아 계산
             # =============================================================
             temp_left, temp_right, input_thks = [], [], []
             for i, l_seg in enumerate(self.left_1999_segments):
@@ -842,7 +904,6 @@ class UltimateShipAnalyzer(QMainWindow):
             temp_left = [affinity.translate(p, yoff=-thickness_y_min) for p in temp_left]
             temp_right = [affinity.translate(p, yoff=-thickness_y_min) for p in temp_right]
 
-            # 폴리곤 계산용 translate (code 1 방식: in-place)
             self.lines_1102 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_1102]
             self.lines_157 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_157]
             self.lines_6001 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_6001]
@@ -850,10 +911,8 @@ class UltimateShipAnalyzer(QMainWindow):
             self.lines_9001 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_9001]
             self.raw_1999_lines = [affinity.translate(l, yoff=-thickness_y_min) for l in self.raw_1999_lines]
 
-            # 1D 추출용 translate (code 2 방식: 로컬 변수)
             c1102 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_1102_raw]
             c157 = list(self.lines_157)
-            c1102 = list(self.lines_1102)
             l1999s = [affinity.translate(l, yoff=-thickness_y_min) for l in self.left_1999_segments]
 
             ext, perp = float(self.txt_ext.text()), float(self.txt_perp.text())
@@ -890,7 +949,7 @@ class UltimateShipAnalyzer(QMainWindow):
             self.raw_shear = float(self.txt_shear_v.text())
 
             # =============================================================
-            # [code 2] 1D 추출 파이프라인 (성실히 유지)
+            # 1D 추출 파이프라인 (메인 선체 폐루프 검출)
             # =============================================================
             progress.setLabelText("Step 1: Loading layers...")
             QApplication.processEvents()
@@ -954,19 +1013,11 @@ class UltimateShipAnalyzer(QMainWindow):
 
             all_cl = split_all_lines_at_intersections(all_cl)
 
-            raw_endpoints_set = set()
-            for cl in all_cl:
-                coords = list(cl['line'].coords)
-                raw_endpoints_set.add(tuple(coords[0]))
-                raw_endpoints_set.add(tuple(coords[-1]))
-            extracted_nodes = list(raw_endpoints_set)
-
-            # [code 2] Step 10: 폐루프 검출
+            # Step 10: 메인 선체 폐루프(Cell) 검출 및 팝업
             progress.setLabelText("Step 10: Detecting closed loops (Cells)...")
             QApplication.processEvents()
 
-            line_geoms = [cl['line'] for cl in all_cl]
-            planarized_network = unary_union(line_geoms)
+            planarized_network = unary_union([cl['line'] for cl in all_cl])
             try:
                 from shapely import set_precision
                 planarized_network = set_precision(planarized_network, grid_size=0.01)
@@ -977,16 +1028,103 @@ class UltimateShipAnalyzer(QMainWindow):
             detected_loops = [poly for poly in raw_loops if poly.area >= 100.0]
             self.mesh_cells = detected_loops
 
-            # 폐루프 디버깅 창
             self.dialog_loop = LoopViewerDialog(all_cl, detected_loops, self)
             self.dialog_loop.show()
             self.debug_dialogs.append(self.dialog_loop)
 
-            self.centerlines = all_cl
-            self.nodes = extracted_nodes
 
             # =============================================================
-            # [code 1] 보고서 생성 (전단류 제거, 나머지 유지)
+            # [신규 추가] 보강재(6001, 7001, 9001) 1D 추출 및 오버레이
+            # =============================================================
+            progress.setLabelText("Step 11: 종골재(Stiffener) 1D 추출 중...")
+            QApplication.processEvents()
+
+            raw_stiffs = self.lines_6001 + self.lines_7001 + self.lines_9001
+
+            # 1. 사전 필터링 (20mm 이하 및 중첩 제거)
+            stiff_f1 = filter_short(raw_stiffs, 20.0)
+            stiff_f2 = remove_overlapping(stiff_f1, dt=1.0)
+
+            # [디버깅 팝업 1] 보강재 필터링 확인
+            self.dialog_stiff1 = StiffenerFilterDialog(raw_stiffs, stiff_f2, self)
+            self.dialog_stiff1.show()
+            self.debug_dialogs.append(self.dialog_stiff1)
+
+            # 2. 중심선 도출
+            stiff_s = []
+            for l in stiff_f2: stiff_s.extend(split_by_slope(l, at=5.0)) # 굴곡진 보강재 대응
+            stiff_pairs = match_pairs(stiff_s, max_dist=50.0, angle_tol=20.0, overlap_tolerance=5.0)
+            stiff_cl = create_centerlines(stiff_pairs)
+            for c in stiff_cl: c['type'] = 'stiffener'
+
+            # [디버깅 팝업 2] 보강재 중심선 확인
+            self.dialog_stiff2 = StiffenerCenterlineDialog(stiff_f2, stiff_cl, self)
+            self.dialog_stiff2.show()
+            self.debug_dialogs.append(self.dialog_stiff2)
+
+            # 3. L/T 조인트 빈 공간 간극 치유 (열린 노드 반경 10mm 레이캐스팅 및 스냅)
+            target_lines = all_cl + stiff_cl
+            healed_stiff_cl = []
+
+            for cl in stiff_cl:
+                coords = list(cl['line'].coords)
+                for ei in [0, -1]:
+                    p = np.array(coords[ei])
+                    nb = 1 if ei == 0 else -2
+                    v = p - np.array(coords[nb])
+                    vn = np.linalg.norm(v)
+                    if vn < 1e-6: continue
+                    d = v / vn
+
+                    # 노드가 열려있는지(Open Node) 확인 (다른 선에 안 닿아있음)
+                    is_open = True
+                    for o in target_lines:
+                        if o['line'] == cl['line']: continue
+                        if o['line'].distance(Point(p)) < 1e-3:
+                            is_open = False; break
+
+                    # 열려있다면 반경 10mm 이내 인접 선분 스캔 후 레이캐스팅
+                    if is_open:
+                        close_lines = [o for o in target_lines if o['line'] != cl['line'] and o['line'].distance(Point(p)) <= 10.0]
+                        if close_lines:
+                            # 방향 벡터로 30mm 길이의 레이캐스팅 수행
+                            ray = LineString([tuple(p), tuple(p + d * 30.0)])
+                            bp, bd = None, 30.0
+                            for o in close_lines:
+                                inter = ray.intersection(o['line'])
+                                if not inter.is_empty:
+                                    pts = [inter] if inter.geom_type == 'Point' else list(inter.geoms) if inter.geom_type == 'MultiPoint' else []
+                                    for pt in pts:
+                                        dd = np.linalg.norm(np.array([pt.x, pt.y]) - p)
+                                        if dd < bd:
+                                            bd = dd; bp = (pt.x, pt.y)
+                            # 교차점을 만났고 반경 10mm 이내라면 노드를 잡아 당김 (Snap)
+                            if bp and bd <= 10.0:
+                                if ei == 0: coords[0] = bp
+                                else: coords[-1] = bp
+                healed_stiff_cl.append({'line': LineString(coords), 'thickness': cl['thickness'], 'type': cl['type']})
+
+            # 치유된 보강재를 메인 선체(all_cl)에 오버레이(합치기)
+            all_combined_cl = all_cl + healed_stiff_cl
+            all_combined_cl = split_all_lines_at_intersections(all_combined_cl)
+
+            # [디버깅 팝업 3] 간극 치유 확인
+            self.dialog_stiff3 = StiffenerHealDialog(all_cl, stiff_cl, healed_stiff_cl, self)
+            self.dialog_stiff3.show()
+            self.debug_dialogs.append(self.dialog_stiff3)
+
+            # 최종 1D 네트워크 구성 완료
+            self.centerlines = all_combined_cl
+            raw_endpoints_set = set()
+            for cl in self.centerlines:
+                coords = list(cl['line'].coords)
+                raw_endpoints_set.add(tuple(coords[0]))
+                raw_endpoints_set.add(tuple(coords[-1]))
+            self.nodes = list(raw_endpoints_set)
+
+
+            # =============================================================
+            # 보고서 데이터 업데이트
             # =============================================================
             all_y = [pt[1] for p in self.calculated_polygons for pt in p.exterior.coords]
             y_max, y_min = max(all_y), min(all_y)
@@ -1012,8 +1150,7 @@ class UltimateShipAnalyzer(QMainWindow):
             res += f"Centerlines      : {len(self.centerlines)}\n"
             res += f"  1999 (shell)   : {len(cl1999)}\n"
             res += f"  1102 (paired)  : {len(cl1102)}\n"
-            res += f"  157  (paired)  : {len(cl157)}\n"
-            res += f"  Bridges        : {bc} pairs\n"
+            res += f"  Stiffeners     : {len(healed_stiff_cl)}\n"
             res += f"Final Nodes      : {len(self.nodes)}\n"
             res += f"Detected Cells   : {len(self.mesh_cells)} (Closed Loops)\n"
 
@@ -1038,9 +1175,6 @@ class UltimateShipAnalyzer(QMainWindow):
             self.btn_calc.setEnabled(True)
             self.btn_load.setEnabled(True)
 
-    # =====================================================================
-    # [code 1] 강도 평가 (엄격 유지)
-    # =====================================================================
     def evaluate_strength(self):
         if not self.is_calculated: return
         k = float(self.txt_grade_k.text())
@@ -1061,9 +1195,6 @@ class UltimateShipAnalyzer(QMainWindow):
         self.result_box.setText(final_res)
         self.btn_save_frame.setEnabled(True)
 
-    # =====================================================================
-    # [code 1] 프레임 저장 / 이력 관리 / Excel (엄격 유지)
-    # =====================================================================
     def save_current_frame(self):
         frame_name, ok = QInputDialog.getText(self, "Save Frame", "Enter Frame Name:",
                                               QLineEdit.EchoMode.Normal, "FR.")
@@ -1160,7 +1291,6 @@ class UltimateShipAnalyzer(QMainWindow):
                                      left=thick if c == min_c else b.left,
                                      right=thick if c == max_c else b.right)
 
-    # [code 1] Excel Export (엄격 유지 - 전단 행 포함)
     def export_to_excel(self):
         if not self.saved_frames_data: return
         path, _ = QFileDialog.getSaveFileName(self, "Export to Excel", "Section_Analysis_Report.xlsx",
@@ -1332,9 +1462,6 @@ class UltimateShipAnalyzer(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
-    # =====================================================================
-    # UI 새로고침: [code 1] ax1(폴리곤) + [code 2] ax2(1D 중심선+노드)
-    # =====================================================================
     def refresh_ui(self):
         saved = [edit.text() for edit in self.shell_thickness_inputs]
         self.fig1.clear()
@@ -1347,12 +1474,12 @@ class UltimateShipAnalyzer(QMainWindow):
         self.shell_thickness_inputs.clear()
 
         if self.is_calculated:
-            # [code 1] ax1: 폴리곤 단면
+            # ax1: 폴리곤 단면
             for poly in self.calculated_polygons:
                 ax1.fill(*poly.exterior.xy, color='blue', alpha=0.4)
                 ax1.plot(*poly.exterior.xy, color='darkblue', lw=1)
 
-            # [code 2] ax2: 1D 중심선 + 노드
+            # ax2: 1D 중심선 + 노드
             if self.centerlines:
                 for cl in self.centerlines:
                     lo = cl['line']
@@ -1361,6 +1488,7 @@ class UltimateShipAnalyzer(QMainWindow):
                     if ct == '1999': color = '#FF00FF'
                     elif ct == '157': color = '#00FFFF'
                     elif ct == '1102': color = '#FFA500'
+                    elif ct == 'stiffener': color = '#008000' # 추가된 종골재
                     elif ct == 'bridge': color = '#00CC00'
                     else: color = '#00FF00'
                     thk = cl.get('thickness', 10.0)
