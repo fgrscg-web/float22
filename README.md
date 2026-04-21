@@ -172,7 +172,7 @@ class UltimateShipAnalyzer(QMainWindow):
         self.lines_157 = []
         self.lines_6001 = []
         self.lines_7001 = []
-        self.lines_8001 = []  # 8001 레이어 변수 추가
+        self.lines_8001 = []
         self.lines_9001 = []
         self.lines_minus1204 = []
         self.hull_centroid = Point(0, 0)
@@ -334,7 +334,7 @@ class UltimateShipAnalyzer(QMainWindow):
 
         self.result_box = QTextEdit()
         self.result_box.setReadOnly(True)
-        self.result_box.setFixedHeight(270)
+        self.result_box.setFixedHeight(300)
         self.result_box.setStyleSheet("font-family: 'Consolas'; font-size: 13px;")
         work_layout.addWidget(self.result_box)
         main_layout.addWidget(work_area, stretch=7)
@@ -723,7 +723,7 @@ class UltimateShipAnalyzer(QMainWindow):
                 result.append({'line': LineString(mids), 'thickness': round(dist * 2) / 2.0})
             return result
 
-        # [핵심 변경부 1] 짧은 분절이 아닌 긴 선(Long Line)을 통째로 오프셋하여 단일 중심선 생성
+        # 긴 선(Long Line)을 통째로 오프셋하여 단일 중심선 생성
         def create_continuous_stiffener_centerlines(pairs):
             long_line_map = {}
             for short_line, long_line, (ov_s, ov_e), dist in pairs:
@@ -745,7 +745,6 @@ class UltimateShipAnalyzer(QMainWindow):
                 if length < 1e-6: continue
                 vu = v / length
                 
-                # 짧은 선들의 중심점을 샘플링하여 오프셋 방향 도출
                 sl = shorts[0]
                 sc = list(sl.coords)
                 ps_mid = (np.array(sc[0]) + np.array(sc[-1])) / 2.0
@@ -1067,6 +1066,8 @@ class UltimateShipAnalyzer(QMainWindow):
             cl157 = create_centerlines(p157)
             for cl in cl157: cl['type'] = '157'
             cl1999 = [l for l in l1999f if l['line'].length > 100.0 or l.get('is_bridge', False)]
+            
+            # 메인 선체(157, 1999, -1102) 네트워크
             all_cl = cl1999 + cl1102 + cl157
 
             progress.setLabelText("Step 7: Ray-casting (≤100mm)...")
@@ -1107,7 +1108,7 @@ class UltimateShipAnalyzer(QMainWindow):
 
 
             # =============================================================
-            # [핵심 변경부 2] 보강재(6001, 7001, 8001, 9001) 추출 및 STRtree 적용
+            # [요청 반영 1] 보강재 필터링 로직 (메인 선체와 맞닿은 부분만 형성)
             # =============================================================
             progress.setLabelText("Step 11: 종골재(Stiffener) 1D 추출 및 공간 인덱싱 병합 중...")
             QApplication.processEvents()
@@ -1125,7 +1126,6 @@ class UltimateShipAnalyzer(QMainWindow):
             for l in stiff_f2: stiff_s.extend(split_by_slope(l, at=5.0)) 
             stiff_pairs = match_pairs(stiff_s, max_dist=50.0, angle_tol=20.0, overlap_tolerance=5.0)
             
-            # 여기서 긴 선을 기준으로 하는 단일 연속 중심선 함수를 호출합니다.
             stiff_cl = create_continuous_stiffener_centerlines(stiff_pairs)
             for c in stiff_cl: c['type'] = 'stiffener'
 
@@ -1133,11 +1133,11 @@ class UltimateShipAnalyzer(QMainWindow):
             self.dialog_stiff2.show()
             self.debug_dialogs.append(self.dialog_stiff2)
 
-            # L/T 조인트 간극 치유 (STRtree를 이용한 O(1) 수준 초고속 연산)
-            target_lines = all_cl + stiff_cl
+            # 레이캐스팅(간극 치유) 시, 메인 선체(all_cl)에만 노드를 형성하도록 제한
+            # ㄱ선분(종골재 자체 형태)은 삭제되지 않고 그대로 유지됨
+            target_lines = all_cl 
             healed_stiff_cl = []
             
-            # Shapely의 STRtree를 생성합니다. (내부 GEOS C 라이브러리 활용)
             target_geoms = [o['line'] for o in target_lines]
             tree = STRtree(target_geoms)
 
@@ -1153,9 +1153,7 @@ class UltimateShipAnalyzer(QMainWindow):
 
                     p_point = Point(p)
                     
-                    # [최적화] 1. STRtree 기반 1e-3 초근접 노드 검사 (열린 노드 판별)
                     res_open = tree.query(p_point.buffer(1e-3))
-                    # Shapely 1.8과 2.0 버전에 대한 출력 결과 호환성을 모두 보장합니다.
                     if len(res_open) > 0 and isinstance(res_open[0], (int, np.integer)):
                         close_1e3 = [target_geoms[i] for i in res_open]
                     else:
@@ -1167,7 +1165,6 @@ class UltimateShipAnalyzer(QMainWindow):
                         if cg.distance(p_point) < 1e-3:
                             is_open = False; break
 
-                    # [최적화] 2. 노드가 열려있을 때만, 반경 10.0 내부 요소 트리 검색 후 교차 시뮬레이션
                     if is_open:
                         res_10 = tree.query(p_point.buffer(10.0))
                         if len(res_10) > 0 and isinstance(res_10[0], (int, np.integer)):
@@ -1195,6 +1192,7 @@ class UltimateShipAnalyzer(QMainWindow):
                             if bp and bd <= 10.0:
                                 if ei == 0: coords[0] = bp
                                 else: coords[-1] = bp
+                # 치유가 됐든 안 됐든, 본래의 형태(ㄱ선분 등)를 리스트에 무조건 보존
                 healed_stiff_cl.append({'line': LineString(coords), 'thickness': cl['thickness'], 'type': cl['type']})
 
             all_combined_cl = all_cl + healed_stiff_cl
@@ -1214,6 +1212,54 @@ class UltimateShipAnalyzer(QMainWindow):
 
 
             # =============================================================
+            # [요청 반영 2] 1D Line 기반의 이너시아(Inertia) 추가 연산 로직
+            # =============================================================
+            a_1d_total = 0.0
+            qx_1d_total = 0.0
+            segments_1d = []
+
+            for cl in self.centerlines:
+                coords = list(cl['line'].coords)
+                thk = cl.get('thickness', 10.0)
+                if thk <= 0: thk = 10.0
+                
+                # 라인이 여러 마디로 꺾여있을 수 있으므로 각 선분 단위로 연산
+                for i in range(len(coords) - 1):
+                    x1, y1 = coords[i]
+                    x2, y2 = coords[i+1]
+                    dx, dy = x2 - x1, y2 - y1
+                    L = np.hypot(dx, dy)
+                    if L < 1e-6: continue
+                    a = L * thk
+                    yc = (y1 + y2) / 2.0
+                    a_1d_total += a
+                    qx_1d_total += a * yc
+                    segments_1d.append((a, yc, dy))
+
+            if a_1d_total > 0:
+                na_1d = qx_1d_total / a_1d_total
+                ixx_1d = 0.0
+                for a, yc, dy in segments_1d:
+                    # 1D 선분의 국부 관성모멘트 I = (Area * dy^2) / 12
+                    i_local = (a * (dy ** 2)) / 12.0
+                    # 평행축 정리 적용
+                    ixx_1d += i_local + a * ((yc - na_1d) ** 2)
+                    
+                all_1d_y = [p[1] for cl in self.centerlines for p in cl['line'].coords]
+                y_max_1d = max(all_1d_y)
+                y_min_1d = min(all_1d_y)
+                depth_1d = (y_max_1d - y_min_1d) * 1e-3
+                na_bl_1d = na_1d * 1e-3
+                dist_top_1d = y_max_1d - na_1d
+                dist_btm_1d = na_1d - y_min_1d
+                
+                z_top_1d = (ixx_1d / dist_top_1d * 1e-9) if dist_top_1d != 0 else 0
+                z_btm_1d = (ixx_1d / dist_btm_1d * 1e-9) if dist_btm_1d != 0 else 0
+            else:
+                na_1d = ixx_1d = depth_1d = na_bl_1d = z_top_1d = z_btm_1d = 0.0
+
+
+            # =============================================================
             # 보고서 데이터 업데이트
             # =============================================================
             all_y = [pt[1] for p in self.calculated_polygons for pt in p.exterior.coords]
@@ -1229,13 +1275,23 @@ class UltimateShipAnalyzer(QMainWindow):
             res = f"--- Applied Loads ---\n"
             res += f"S.W.B.M          : {self.raw_swbm:,.2f} tm\n"
             res += f"Shear Force      : {self.raw_shear:,.2f} t\n\n"
-            res += f"--- Geometric Properties ---\n"
+            
+            res += f"--- Geometric Properties (2D Polygon) ---\n"
             res += f"Total Area       : {self.calc_total_area / 100.0:>10,.2f} cm^2\n"
             res += f"I_xx(m^4)        : {self.calc_ixx * 1e-12:,.6e}\n"
             res += f"Depth(m)         : {self.calc_depth:.3f}\n"
             res += f"Position of N.A from B.L(m) : {self.calc_na_bl * 1e-3:.3f}\n"
             res += f"Zact_btm         : {self.calc_z_btm:,.4f} m^3\n"
             res += f"Zact_top         : {self.calc_z_top:,.4f} m^3\n\n"
+
+            res += f"--- Geometric Properties (1D Centerline) ---\n"
+            res += f"Total Area       : {a_1d_total / 100.0:>10,.2f} cm^2\n"
+            res += f"I_xx(m^4)        : {ixx_1d * 1e-12:,.6e}\n"
+            res += f"Depth(m)         : {depth_1d:.3f}\n"
+            res += f"Position of N.A from B.L(m) : {na_bl_1d:.3f}\n"
+            res += f"Zact_btm         : {z_btm_1d:,.4f} m^3\n"
+            res += f"Zact_top         : {z_top_1d:,.4f} m^3\n\n"
+
             res += f"--- 1D Extraction Results ---\n"
             res += f"Centerlines      : {len(self.centerlines)}\n"
             res += f"  1999 (shell)   : {len(cl1999)}\n"
