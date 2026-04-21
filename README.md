@@ -177,18 +177,25 @@ class UltimateShipAnalyzer(QMainWindow):
         self.lines_minus1204 = []
         self.hull_centroid = Point(0, 0)
         self.shell_thickness_inputs = []
-        self.calculated_polygons = []
         self.is_calculated = False
         self.shear_flows = []
         self.mesh_cells = []
         self.centerlines = []
         self.nodes = []
+        self.cell_points = []
         self.max_shell_q_idx = -1
         self.max_shell_thk = 0.0
         self.q_per_v = 0.0
         self.max_Q = 0.0
-        self.calc_na_bl = 0.0
+        
+        # 1D Inertia properties
+        self.calc_total_area = 0.0
+        self.calc_ixx = 0.0
         self.calc_depth = 0.0
+        self.calc_na_bl = 0.0
+        self.calc_z_top = 0.0
+        self.calc_z_btm = 0.0
+        
         self.base_report = ""
         self.act_fb = 0.0
         self.act_fs = 0.0
@@ -319,7 +326,7 @@ class UltimateShipAnalyzer(QMainWindow):
         work_area = QWidget()
         work_layout = QVBoxLayout(work_area)
         viz_splitter = QSplitter(Qt.Horizontal)
-        for i, title in enumerate(["[Cross Section View]", "[1D Lines & Nodes]"]):
+        for i, title in enumerate(["[Cross Section View (1D)]", "[Closed Cells & Points]"]):
             container = QWidget()
             lay = QVBoxLayout(container)
             lay.addWidget(QLabel(f"<b>{title}</b>"))
@@ -383,66 +390,6 @@ class UltimateShipAnalyzer(QMainWindow):
         except:
             return None
         return None
-
-    def generate_outward_thickness(self, line, thickness):
-        try:
-            coords = list(line.coords)
-            if len(coords) < 2: return line.buffer(thickness / 2.0)
-            cx = sum(p[0] for p in coords) / len(coords)
-            cy = sum(p[1] for p in coords) / len(coords)
-            vx, vy = cx - self.hull_centroid.x, cy - self.hull_centroid.y
-            lx, ly = coords[-1][0] - coords[0][0], coords[-1][1] - coords[0][1]
-            length = (lx ** 2 + ly ** 2) ** 0.5
-            if length == 0: return line.buffer(thickness / 2.0)
-            nx, ny = -ly / length, lx / length
-            if (nx * vx + ny * vy) < 0:
-                nx, ny = -nx, -ny
-            new_coords = coords + [(p[0] + nx * thickness, p[1] + ny * thickness) for p in reversed(coords)]
-            return Polygon(new_coords)
-        except:
-            return line.buffer(thickness / 2.0)
-
-    def apply_original_algorithm(self, target_lines, shell_lines, ext, perp, max_a):
-        if not target_lines: return []
-        raw_lines = target_lines + shell_lines
-        noded_network = unary_union(raw_lines)
-        if noded_network.geom_type in ('LineString', 'LinearRing'):
-            all_l = [noded_network]
-        elif noded_network.geom_type == 'MultiLineString':
-            all_l = list(noded_network.geoms)
-        else:
-            all_l = []
-
-        ext_l, p_lines = [], []
-        all_p = [pt for l in all_l for pt in [l.coords[0], l.coords[-1]]]
-        u_p, cnts = np.unique(np.round(all_p, 3), axis=0, return_counts=True)
-        ends = [tuple(p) for p, c in zip(u_p, cnts) if c == 1]
-
-        for pt in ends:
-            for l in all_l:
-                if np.allclose(l.coords[0], pt) or np.allclose(l.coords[-1], pt):
-                    c = list(l.coords)
-                    p_t, p_a = (np.array(c[0]), np.array(c[1])) if np.allclose(c[0], pt) else (
-                    np.array(c[-1]), np.array(c[-2]))
-                    diff = p_t - p_a
-                    norm = np.linalg.norm(diff)
-                    if norm > 1e-9:
-                        vec = diff / norm
-                        n = np.array([-vec[1], vec[0]])
-                        p_lines.append(LineString([tuple(pt + n * perp), pt, tuple(pt - n * perp)]))
-                        break
-        for l in all_l:
-            c = list(l.coords)
-            p_s, p_n = np.array(c[0]), np.array(c[1])
-            p_l, p_p = np.array(c[-1]), np.array(c[-2])
-            v_s = (p_s - p_n) / (np.linalg.norm(p_s - p_n) + 1e-9)
-            v_e = (p_l - p_p) / (np.linalg.norm(p_l - p_p) + 1e-9)
-            c[0], c[-1] = tuple(p_s + v_s * ext), tuple(p_l + v_e * ext)
-            ext_l.append(LineString(c))
-
-        f_net = unary_union(ext_l + p_lines + shell_lines)
-        c_polys = sorted(list(polygonize(f_net)), key=lambda p: p.area, reverse=True)
-        return [p for p in c_polys if p.area < max_a]
 
     def heal_1102_collinear(self, lines, threshold_gap=150.0):
         if not lines: return []
@@ -580,7 +527,7 @@ class UltimateShipAnalyzer(QMainWindow):
             self.result_box.setText(f"❌ Load Error Detailed:\n{traceback.format_exc()}")
 
     # =====================================================================
-    # 메인 계산 (최적화 적용부)
+    # 메인 계산 (1D 기반 이너시아)
     # =====================================================================
     def calculate_total_inertia(self):
         if self.is_processing: return
@@ -950,76 +897,31 @@ class UltimateShipAnalyzer(QMainWindow):
             return new_centerlines
 
         try:
-            # =============================================================
-            # 폴리곤 생성 및 2D 이너시아 계산
-            # =============================================================
-            temp_left, temp_right, input_thks = [], [], []
-            for i, l_seg in enumerate(self.left_1999_segments):
-                if progress.wasCanceled():
-                    raise UserWarning("User canceled.")
-                if i % 2 == 0: QApplication.processEvents()
-                try:
-                    t = float(self.shell_thickness_inputs[i].text())
-                except:
-                    t = 10.0
-                input_thks.append(t)
-                lp = self.generate_outward_thickness(l_seg, t)
-                temp_left.append(lp)
-                temp_right.append(affinity.scale(lp, xfact=-1.0, origin=(0, 0)))
-
-            all_shells = temp_left + temp_right
-            if not all_shells:
-                raise UserWarning("No shell polygons.")
-
-            combined_shell = unary_union(all_shells)
-            thickness_y_min = combined_shell.bounds[1]
-            temp_left = [affinity.translate(p, yoff=-thickness_y_min) for p in temp_left]
-            temp_right = [affinity.translate(p, yoff=-thickness_y_min) for p in temp_right]
-
-            self.lines_1102 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_1102]
-            self.lines_157 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_157]
-            self.lines_6001 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_6001]
-            self.lines_7001 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_7001]
-            self.lines_8001 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_8001]
-            self.lines_9001 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_9001]
-            self.raw_1999_lines = [affinity.translate(l, yoff=-thickness_y_min) for l in self.raw_1999_lines]
-
-            c1102 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_1102_raw]
-            c157 = list(self.lines_157)
-            l1999s = [affinity.translate(l, yoff=-thickness_y_min) for l in self.left_1999_segments]
-
-            ext, perp = float(self.txt_ext.text()), float(self.txt_perp.text())
-            all_internal_lines = self.lines_1102 + self.lines_157 + self.lines_6001 + self.lines_7001 + self.lines_8001 + self.lines_9001
-            internal_polys = self.apply_original_algorithm(all_internal_lines, self.raw_1999_lines, ext, perp,
-                                                           0.5 * 1e6) if all_internal_lines else []
-
-            full_list = temp_left + temp_right + internal_polys
-            if not full_list:
-                raise UserWarning("No polygons generated.")
-
-            self.calculated_polygons = full_list
-            self.calc_total_area = sum(p.area for p in self.calculated_polygons)
-            self.calc_na_bl = sum(p.centroid.y * p.area for p in self.calculated_polygons) / (
-                self.calc_total_area if self.calc_total_area != 0 else 1e-9)
-
-            self.calc_ixx = 0.0
-
-            def ring_ixx_na(ring, na_y):
-                pts = list(ring.coords)
-                val = 0.0
-                for i in range(len(pts) - 1):
-                    x1, y1 = pts[i][0], pts[i][1] - na_y
-                    x2, y2 = pts[i + 1][0], pts[i + 1][1] - na_y
-                    val += (y1 ** 2 + y1 * y2 + y2 ** 2) * (x1 * y2 - x2 * y1)
-                return abs(val / 12.0)
-
-            for poly in self.calculated_polygons:
-                self.calc_ixx += ring_ixx_na(poly.exterior, self.calc_na_bl)
-                for h in poly.interiors:
-                    self.calc_ixx -= ring_ixx_na(h, self.calc_na_bl)
-
+            # 기본 하중 변수 설정
             self.raw_swbm = float(self.txt_swbm.text())
             self.raw_shear = float(self.txt_shear_v.text())
+
+            # =============================================================
+            # 베이스라인 정렬 (1999 레이어의 가장 낮은 위치를 0으로)
+            # =============================================================
+            y_mins = []
+            input_thks = []
+            for i, l_seg in enumerate(self.left_1999_segments):
+                if progress.wasCanceled(): raise UserWarning("User canceled.")
+                try: t = float(self.shell_thickness_inputs[i].text())
+                except: t = 10.0
+                input_thks.append(t)
+                y_mins.append(l_seg.bounds[1] - t / 2.0)
+            
+            thickness_y_min = min(y_mins) if y_mins else 0.0
+
+            c1102 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_1102_raw]
+            c157  = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_157]
+            c6001 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_6001]
+            c7001 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_7001]
+            c8001 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_8001]
+            c9001 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_9001]
+            l1999s = [affinity.translate(l, yoff=-thickness_y_min) for l in self.left_1999_segments]
 
             # =============================================================
             # 1D 추출 파이프라인 (메인 선체 폐루프 검출)
@@ -1029,10 +931,7 @@ class UltimateShipAnalyzer(QMainWindow):
 
             l1999f = []
             for i, ls in enumerate(l1999s):
-                try:
-                    ta = float(self.shell_thickness_inputs[i].text())
-                except:
-                    ta = 10.0
+                ta = input_thks[i] if i < len(input_thks) else 10.0
                 l1999f.append({'line': ls, 'thickness': ta, 'type': '1999'})
                 l1999f.append({'line': affinity.scale(ls, xfact=-1.0, origin=(0, 0)), 'thickness': ta, 'type': '1999'})
 
@@ -1099,21 +998,82 @@ class UltimateShipAnalyzer(QMainWindow):
                 pass
 
             raw_loops = list(polygonize(planarized_network))
-            detected_loops = [poly for poly in raw_loops if poly.area >= 100.0]
-            self.mesh_cells = detected_loops
+            self.mesh_cells = [poly for poly in raw_loops if poly.area >= 100.0]
+            
+            # =================================================================
+            # [요청 반영] 폐단면의 꼭짓점 포인트(Cell Points) 추출
+            # 중간(Collinear) 좌표 제거, 구조적 노드(교차, 두께 변경점) 유지
+            # =================================================================
+            self.cell_points = []
+            pts = set()
+            
+            if self.mesh_cells:
+                # 1D 네트워크(메인 선체)의 실제 노드만 추출 (중간점 필터링용)
+                hull_nodes = set()
+                for cl in all_cl:
+                    coords = list(cl['line'].coords)
+                    hull_nodes.add((round(coords[0][0], 2), round(coords[0][1], 2)))
+                    hull_nodes.add((round(coords[-1][0], 2), round(coords[-1][1], 2)))
+                    
+                def is_corner(p1, p2, p3):
+                    v1 = np.array(p1) - np.array(p2)
+                    v2 = np.array(p3) - np.array(p2)
+                    n1 = np.linalg.norm(v1)
+                    n2 = np.linalg.norm(v2)
+                    if n1 < 1e-6 or n2 < 1e-6: return False
+                    cos_ang = np.dot(v1, v2) / (n1 * n2)
+                    cos_ang = np.clip(cos_ang, -1.0, 1.0)
+                    ang = np.degrees(np.arccos(cos_ang))
+                    return abs(ang - 180.0) > 1.0  # 1도 이상 꺾이면 코너로 인정
 
-            self.dialog_loop = LoopViewerDialog(all_cl, detected_loops, self)
+                for poly in self.mesh_cells:
+                    coords = list(poly.exterior.coords)
+                    n_c = len(coords)
+                    if n_c < 4:
+                        for c in coords:
+                            pts.add((round(c[0], 2), round(c[1], 2)))
+                        continue
+                        
+                    for i in range(n_c - 1):
+                        p_curr = coords[i]
+                        p_prev = coords[i - 1]
+                        p_next = coords[i + 1] if i + 1 < n_c else coords[1]
+                        
+                        pt_key = (round(p_curr[0], 2), round(p_curr[1], 2))
+                        
+                        # 1. 기하학적인 모서리이거나
+                        # 2. 원래 네트워크상에서 쪼개진 '진짜 구조적 노드'인 경우만 추가
+                        if is_corner(p_prev, p_curr, p_next) or pt_key in hull_nodes:
+                            pts.add(pt_key)
+            
+            # [추가 요청 반영] 1999 레이어의 두께가 바뀌는 지점을 강제로 찾아 노드로 추가
+            # unary_union 과정에서 1999 직선 구간이 병합되어 노드가 누락되는 것을 방지
+            p_1999_dict = defaultdict(set)
+            for cl in all_cl:
+                if cl.get('type') == '1999':
+                    c_line = list(cl['line'].coords)
+                    thk = cl.get('thickness', 10.0)
+                    p_1999_dict[(round(c_line[0][0], 2), round(c_line[0][1], 2))].add(thk)
+                    p_1999_dict[(round(c_line[-1][0], 2), round(c_line[-1][1], 2))].add(thk)
+                    
+            for pt_key, thks in p_1999_dict.items():
+                if len(thks) > 1: # 두 가지 이상의 두께가 만나는 점 (두께 변경점)
+                    pts.add(pt_key)
+
+            self.cell_points = list(pts)
+
+            self.dialog_loop = LoopViewerDialog(all_cl, self.mesh_cells, self)
             self.dialog_loop.show()
             self.debug_dialogs.append(self.dialog_loop)
 
 
             # =============================================================
-            # [요청 반영 1] 보강재 필터링 로직 (메인 선체와 맞닿은 부분만 형성)
+            # 보강재 필터링 로직 (메인 선체와 맞닿은 부분만 형성)
             # =============================================================
             progress.setLabelText("Step 11: 종골재(Stiffener) 1D 추출 및 공간 인덱싱 병합 중...")
             QApplication.processEvents()
 
-            raw_stiffs = self.lines_6001 + self.lines_7001 + self.lines_8001 + self.lines_9001
+            raw_stiffs = c6001 + c7001 + c8001 + c9001
 
             stiff_f1 = filter_short(raw_stiffs, 20.0)
             stiff_f2 = remove_overlapping(stiff_f1, dt=1.0)
@@ -1133,8 +1093,6 @@ class UltimateShipAnalyzer(QMainWindow):
             self.dialog_stiff2.show()
             self.debug_dialogs.append(self.dialog_stiff2)
 
-            # 레이캐스팅(간극 치유) 시, 메인 선체(all_cl)에만 노드를 형성하도록 제한
-            # ㄱ선분(종골재 자체 형태)은 삭제되지 않고 그대로 유지됨
             target_lines = all_cl 
             healed_stiff_cl = []
             
@@ -1192,7 +1150,6 @@ class UltimateShipAnalyzer(QMainWindow):
                             if bp and bd <= 10.0:
                                 if ei == 0: coords[0] = bp
                                 else: coords[-1] = bp
-                # 치유가 됐든 안 됐든, 본래의 형태(ㄱ선분 등)를 리스트에 무조건 보존
                 healed_stiff_cl.append({'line': LineString(coords), 'thickness': cl['thickness'], 'type': cl['type']})
 
             all_combined_cl = all_cl + healed_stiff_cl
@@ -1212,7 +1169,7 @@ class UltimateShipAnalyzer(QMainWindow):
 
 
             # =============================================================
-            # [요청 반영 2] 1D Line 기반의 이너시아(Inertia) 추가 연산 로직
+            # 1D Line 기반의 이너시아(Inertia) 단일 연산
             # =============================================================
             a_1d_total = 0.0
             qx_1d_total = 0.0
@@ -1223,7 +1180,7 @@ class UltimateShipAnalyzer(QMainWindow):
                 thk = cl.get('thickness', 10.0)
                 if thk <= 0: thk = 10.0
                 
-                # 라인이 여러 마디로 꺾여있을 수 있으므로 각 선분 단위로 연산
+                # 여러 마디로 꺾여있을 수 있으므로 각 선분 단위로 연산
                 for i in range(len(coords) - 1):
                     x1, y1 = coords[i]
                     x2, y2 = coords[i+1]
@@ -1258,25 +1215,25 @@ class UltimateShipAnalyzer(QMainWindow):
             else:
                 na_1d = ixx_1d = depth_1d = na_bl_1d = z_top_1d = z_btm_1d = 0.0
 
-
-            # =============================================================
-            # 보고서 데이터 업데이트
-            # =============================================================
-            all_y = [pt[1] for p in self.calculated_polygons for pt in p.exterior.coords]
-            y_max, y_min = max(all_y), min(all_y)
-            self.calc_depth = (y_max - y_min) * 1e-3
-            dist_top = y_max - self.calc_na_bl
-            dist_btm = self.calc_na_bl - y_min
-            z_act_top_mm3 = self.calc_ixx / dist_top if dist_top != 0 else 1e-9
-            self.calc_z_top = z_act_top_mm3 * 1e-9
-            self.calc_z_btm = (self.calc_ixx / dist_btm * 1e-9) if dist_btm != 0 else 0
+            # 산출된 1D 결과값을 기존 멤버 변수(Excel Export용 등)에 오버라이드
+            self.calc_total_area = a_1d_total
+            self.calc_ixx = ixx_1d
+            self.calc_depth = depth_1d
+            self.calc_na_bl = na_1d
+            self.calc_z_top = z_top_1d
+            self.calc_z_btm = z_btm_1d
+            
+            z_act_top_mm3 = self.calc_ixx / dist_top_1d if dist_top_1d != 0 else 1e-9
             self.act_fb = (abs(self.raw_swbm) * 9.80665 * 1e6) / z_act_top_mm3
 
+            # =============================================================
+            # 출력창(결과) 리포트 업데이트
+            # =============================================================
             res = f"--- Applied Loads ---\n"
             res += f"S.W.B.M          : {self.raw_swbm:,.2f} tm\n"
             res += f"Shear Force      : {self.raw_shear:,.2f} t\n\n"
             
-            res += f"--- Geometric Properties (2D Polygon) ---\n"
+            res += f"--- Geometric Properties (1D Line Based) ---\n"
             res += f"Total Area       : {self.calc_total_area / 100.0:>10,.2f} cm^2\n"
             res += f"I_xx(m^4)        : {self.calc_ixx * 1e-12:,.6e}\n"
             res += f"Depth(m)         : {self.calc_depth:.3f}\n"
@@ -1284,21 +1241,13 @@ class UltimateShipAnalyzer(QMainWindow):
             res += f"Zact_btm         : {self.calc_z_btm:,.4f} m^3\n"
             res += f"Zact_top         : {self.calc_z_top:,.4f} m^3\n\n"
 
-            res += f"--- Geometric Properties (1D Centerline) ---\n"
-            res += f"Total Area       : {a_1d_total / 100.0:>10,.2f} cm^2\n"
-            res += f"I_xx(m^4)        : {ixx_1d * 1e-12:,.6e}\n"
-            res += f"Depth(m)         : {depth_1d:.3f}\n"
-            res += f"Position of N.A from B.L(m) : {na_bl_1d:.3f}\n"
-            res += f"Zact_btm         : {z_btm_1d:,.4f} m^3\n"
-            res += f"Zact_top         : {z_top_1d:,.4f} m^3\n\n"
-
             res += f"--- 1D Extraction Results ---\n"
             res += f"Centerlines      : {len(self.centerlines)}\n"
             res += f"  1999 (shell)   : {len(cl1999)}\n"
             res += f"  1102 (paired)  : {len(cl1102)}\n"
             res += f"  Stiffeners     : {len(healed_stiff_cl)}\n"
-            res += f"Final Nodes      : {len(self.nodes)}\n"
             res += f"Detected Cells   : {len(self.mesh_cells)} (Closed Loops)\n"
+            res += f"Cell Points      : {len(self.cell_points)} (Vertices)\n"
 
             self.base_report = res
             self.result_box.setText(self.base_report)
@@ -1620,12 +1569,9 @@ class UltimateShipAnalyzer(QMainWindow):
         self.shell_thickness_inputs.clear()
 
         if self.is_calculated:
-            # ax1: 폴리곤 단면
-            for poly in self.calculated_polygons:
-                ax1.fill(*poly.exterior.xy, color='blue', alpha=0.4)
-                ax1.plot(*poly.exterior.xy, color='darkblue', lw=1)
-
-            # ax2: 1D 중심선 + 노드
+            # =================================================================
+            # ax1: Cross Section View (1D 선분 및 두께만 표현, 노드 표시 안 함)
+            # =================================================================
             if self.centerlines:
                 for cl in self.centerlines:
                     lo = cl['line']
@@ -1638,24 +1584,37 @@ class UltimateShipAnalyzer(QMainWindow):
                     elif ct == 'bridge': color = '#00CC00'
                     else: color = '#00FF00'
                     thk = cl.get('thickness', 10.0)
+                    
                     if thk > 0:
                         try:
                             poly = lo.buffer(thk / 2.0, cap_style=2)
                             if poly.geom_type == 'Polygon':
-                                ax2.fill(*poly.exterior.xy, color=color, alpha=0.3, zorder=9, edgecolor='none')
+                                ax1.fill(*poly.exterior.xy, color=color, alpha=0.3, zorder=9, edgecolor='none')
                             elif poly.geom_type == 'MultiPolygon':
                                 for p in poly.geoms:
-                                    ax2.fill(*p.exterior.xy, color=color, alpha=0.3, zorder=9, edgecolor='none')
+                                    ax1.fill(*p.exterior.xy, color=color, alpha=0.3, zorder=9, edgecolor='none')
                         except:
                             pass
-                    ax2.plot(x, y, color=color, linewidth=2.5, alpha=0.9, zorder=10, linestyle='-')
+                    ax1.plot(x, y, color=color, linewidth=2.5, alpha=0.9, zorder=10, linestyle='-')
 
-            if self.nodes:
-                ax2.plot([p[0] for p in self.nodes], [p[1] for p in self.nodes], 'ro', markersize=5,
-                         markeredgecolor='white', markeredgewidth=1,
-                         label=f'Nodes ({len(self.nodes)})', zorder=11)
+            # =================================================================
+            # ax2: 폐단면(Cells) 및 꼭짓점(Points) 표현
+            # =================================================================
+            if hasattr(self, 'mesh_cells') and self.mesh_cells:
+                cmap = matplotlib.colormaps.get_cmap('tab20')
+                for idx, poly in enumerate(self.mesh_cells):
+                    color = cmap(idx % 20)
+                    ax2.fill(*poly.exterior.xy, color=color, alpha=0.4)
+                    ax2.plot(*poly.exterior.xy, color=color, linewidth=1.5)
+            
+            if hasattr(self, 'cell_points') and self.cell_points:
+                ax2.plot([p[0] for p in self.cell_points], [p[1] for p in self.cell_points], 'ro', markersize=4,
+                         markeredgecolor='white', markeredgewidth=0.5,
+                         label=f'Points ({len(self.cell_points)})', zorder=11)
+                
             h, l = ax2.get_legend_handles_labels()
             if h: ax2.legend(loc="upper right", fontsize=8)
+            
         else:
             if self.raw_1999_lines:
                 for ls in self.raw_1999_lines:
