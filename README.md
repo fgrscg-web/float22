@@ -35,112 +35,97 @@ rcParams['axes.unicode_minus'] = False
 
 
 # =========================================================================
-# [디버깅 팝업] 1. 종골재 사전 필터링 확인창
+# [디버깅 팝업] 전단류 순환 경로 및 노드 단위 가상 슬릿 확인창
 # =========================================================================
-class StiffenerFilterDialog(QDialog):
-    def __init__(self, raw_lines, filtered_lines, parent=None):
+class ShearFlowPathDialog(QDialog):
+    def __init__(self, directed_segments, undirected_segments, slit_nodes, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("디버깅 1: 보강재 사전 필터링 (20mm 이하 및 중첩 제거)")
-        self.resize(800, 600)
+        self.setWindowTitle("디버깅: 전단류 순환 경로 및 꼭짓점 가상 슬릿")
+        self.resize(1000, 800)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("<b>[가이드]</b> 회색: 원본 CAD 선분 / <font color='blue'><b>파란색: 필터링 후 생존한 선분</b></font>"))
-        fig = Figure()
-        canvas = FigureCanvas(fig)
-        layout.addWidget(NavigationToolbar(canvas, self))
-        layout.addWidget(canvas, stretch=1)
-        ax = fig.add_subplot(111)
-        ax.set_aspect('equal')
-        ax.grid(True, linestyle=':', alpha=0.6)
-        
-        for l in raw_lines: ax.plot(*l.xy, color='lightgray', lw=3)
-        for l in filtered_lines: ax.plot(*l.xy, color='blue', lw=1.5)
-        canvas.draw()
-
-
-# =========================================================================
-# [디버깅 팝업] 2. 종골재 중심선 도출 확인창
-# =========================================================================
-class StiffenerCenterlineDialog(QDialog):
-    def __init__(self, filtered_lines, centerlines, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("디버깅 2: 보강재 중심선(Centerline) 도출")
-        self.resize(800, 600)
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("<b>[가이드]</b> 파란색: 필터링된 윤곽선 / <font color='red'><b>빨간색: 짝을 맞춰 추출된 1D 중심선</b></font>"))
-        fig = Figure()
-        canvas = FigureCanvas(fig)
-        layout.addWidget(NavigationToolbar(canvas, self))
-        layout.addWidget(canvas, stretch=1)
-        ax = fig.add_subplot(111)
-        ax.set_aspect('equal')
-        ax.grid(True, linestyle=':', alpha=0.6)
-        
-        for l in filtered_lines: ax.plot(*l.xy, color='blue', lw=1, alpha=0.5)
-        for cl in centerlines: ax.plot(*cl['line'].xy, color='red', lw=2)
-        canvas.draw()
-
-
-# =========================================================================
-# [디버깅 팝업] 3. L/T 조인트 간극 치유(Raycast & Merge) 확인창
-# =========================================================================
-class StiffenerHealDialog(QDialog):
-    def __init__(self, hull_cl, raw_cl, healed_cl, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("디버깅 3: 열린 노드 레이캐스팅 및 간극 치유")
-        self.resize(900, 700)
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("<b>[가이드]</b> 연한 회색: 선체 외판 / <font color='orange'><b>주황 점선: 치유 전 중심선</b></font> / <font color='green'><b>초록 실선: 교차점까지 연장(Healing)된 최종 보강재</b></font>"))
-        fig = Figure()
-        canvas = FigureCanvas(fig)
-        layout.addWidget(NavigationToolbar(canvas, self))
-        layout.addWidget(canvas, stretch=1)
-        ax = fig.add_subplot(111)
-        ax.set_aspect('equal')
-        ax.grid(True, linestyle=':', alpha=0.6)
-        
-        for cl in hull_cl: ax.plot(*cl['line'].xy, color='lightgray', lw=2)
-        for cl in raw_cl: ax.plot(*cl['line'].xy, color='orange', lw=2, linestyle='--', alpha=0.7)
-        for cl in healed_cl: ax.plot(*cl['line'].xy, color='green', lw=2)
-        canvas.draw()
-
-
-# =========================================================================
-# [code 2] 폐단면 검출 디버깅 다이얼로그
-# =========================================================================
-class LoopViewerDialog(QDialog):
-    def __init__(self, centerlines, loops, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("디버깅: 폐단면(다중 셀) 검출 확인")
-        self.resize(1000, 700)
-        layout = QVBoxLayout(self)
-        lbl = QLabel("<b>[시각화 가이드]</b><br>"
-                     "회색 선: 1D 중심선 네트워크<br>"
-                     "색상 영역: 독립된 폐단면(Cell)으로 인식된 루프들")
+        lbl = QLabel("<b>[시각화 가이드]</b> (꼭짓점 단위 메인 선체 한정)<br>"
+                     "파란색 실선: 전단류 순환 경로 (곡선부 형상 유지)<br>"
+                     "회색 실선: 열린 끝단(방향 배제됨)<br>"
+                     "파란색 빈 원(<b>o</b>): 선분 시작점 (Start) / 빨간색 가위표(<b>x</b>): 선분 끝점 (End)<br>"
+                     "※ 일반 노드는 <b>o</b>와 <b>x</b>가 겹쳐져 <b>⊕</b> 형태로 표시되어 흐름의 연속성을 증명함<br>"
+                     "<font color='magenta'><b>자홍색 사각형: 가상 슬릿(Slit) 꼭짓점 (o 혹은 x만 단독으로 존재하여 루프를 절단함)</b></font><br>"
+                     "<font color='gray'>작은 회색 점: 단순 경로 중간 기착지</font>")
         layout.addWidget(lbl)
+        
         self.fig = Figure()
         canvas = FigureCanvas(self.fig)
         toolbar = NavigationToolbar(canvas, self)
         layout.addWidget(toolbar)
         layout.addWidget(canvas, stretch=1)
+        
         btn = QPushButton("닫기")
         btn.setFixedHeight(40)
         btn.setStyleSheet("background-color: #8E44AD; color: white; font-weight: bold; font-size: 14px;")
         btn.clicked.connect(self.close)
         layout.addWidget(btn)
+        
         ax = self.fig.add_subplot(111)
         ax.set_aspect('equal')
         ax.grid(True, linestyle=':', alpha=0.6)
-        for cl in centerlines:
-            ax.plot(*cl['line'].xy, color='gray', linewidth=1.5, alpha=0.6)
-        cmap = matplotlib.colormaps.get_cmap('tab20')
-        for idx, poly in enumerate(loops):
-            color = cmap(idx % 20)
-            ax.fill(*poly.exterior.xy, color=color, alpha=0.4)
-            ax.plot(*poly.exterior.xy, color=color, linewidth=2.5)
-            cx, cy = poly.centroid.x, poly.centroid.y
-            ax.text(cx, cy, f"Cell {idx+1}", color='black', fontsize=11, fontweight='bold',
-                    ha='center', va='center',
-                    bbox=dict(facecolor='white', alpha=0.8, edgecolor='black', boxstyle='round,pad=0.3'))
+        
+        # 1. 방향 배제된 열린 끝단 (Free Ends) 렌더링
+        for seg in undirected_segments:
+            p1 = np.array(seg['start_pos'])
+            p2 = np.array(seg['end_pos'])
+            mid_pos_list = seg.get('mid_pos_list', [])
+            path_pts = [p1] + mid_pos_list + [p2]
+            xs = [pt[0] for pt in path_pts]
+            ys = [pt[1] for pt in path_pts]
+            # 방향 마커나 화살표 없이 회색 선으로만 그림
+            ax.plot(xs, ys, color='gray', linestyle='-', linewidth=1.5, alpha=0.7, zorder=3)
+            for mp in mid_pos_list:
+                ax.plot(mp[0], mp[1], marker='.', color='lightgray', markersize=4, zorder=3)
+
+        # 2. 방향이 배정된 활성 순환 경로 렌더링
+        for seg in directed_segments:
+            p1 = np.array(seg['start_pos'])
+            p2 = np.array(seg['end_pos'])
+            mid_pos_list = seg.get('mid_pos_list', [])
+            is_slit = seg['is_slit']
+            
+            color = 'magenta' if is_slit else 'dodgerblue'
+            style = '--' if is_slit else '-'
+            lw = 2.5 if is_slit else 1.5
+            
+            path_pts = [p1] + mid_pos_list + [p2]
+            xs = [pt[0] for pt in path_pts]
+            ys = [pt[1] for pt in path_pts]
+            
+            ax.plot(xs, ys, color=color, linestyle=style, linewidth=lw, zorder=4)
+            
+            # 화살촉 부착
+            if len(path_pts) >= 2:
+                arr_p1 = path_pts[-2]
+                arr_p2 = path_pts[-1]
+                arrow = patches.FancyArrowPatch(
+                    (arr_p1[0], arr_p1[1]), (arr_p2[0], arr_p2[1]),
+                    mutation_scale=15,
+                    color=color,
+                    linestyle=style,
+                    linewidth=lw,
+                    arrowstyle='-|>',
+                    zorder=5
+                )
+                ax.add_patch(arrow)
+            
+            # Start/End 마커는 실제 흐름(Tree Edges)에만 부여
+            if not is_slit:
+                ax.plot(p1[0], p1[1], marker='o', color='blue', markerfacecolor='none', markersize=8, markeredgewidth=1.5, zorder=6)
+                ax.plot(p2[0], p2[1], marker='x', color='red', markersize=8, markeredgewidth=1.5, zorder=6)
+
+            for mp in mid_pos_list:
+                ax.plot(mp[0], mp[1], marker='.', color='gray', markersize=4, zorder=5)
+
+        # 3. 슬릿(Slit) 노드 강조 표시
+        for sn in slit_nodes:
+            pos = sn['pos']
+            ax.plot(pos[0], pos[1], marker='s', color='magenta', markerfacecolor='none', markersize=14, markeredgewidth=2.5, zorder=7)
+
         canvas.draw()
 
     def closeEvent(self, event: QCloseEvent):
@@ -154,13 +139,16 @@ class LoopViewerDialog(QDialog):
 class UltimateShipAnalyzer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FloatCalc - Ship Floating Strength Analyzer")
+        self.setWindowTitle("HHI-FAIVE - Ship Floating Strength Analyzer")
         self.setWindowIcon(QIcon('icon.ico'))
         self.resize(2000, 1200)
         self.saved_frames_data = []
         self.current_dxf_path = ""
         self.is_processing = False
         self.debug_dialogs = []
+        self.directed_segments = []
+        self.undirected_segments = []
+        self.slit_nodes = []
         self.reset_analysis_data()
         self.init_ui()
 
@@ -183,6 +171,9 @@ class UltimateShipAnalyzer(QMainWindow):
         self.centerlines = []
         self.nodes = []
         self.cell_points = []
+        self.directed_segments = []
+        self.undirected_segments = []
+        self.slit_nodes = []
         self.max_shell_q_idx = -1
         self.max_shell_thk = 0.0
         self.q_per_v = 0.0
@@ -545,6 +536,16 @@ class UltimateShipAnalyzer(QMainWindow):
         # =============================================================
         # 1D 추출 헬퍼 함수들
         # =============================================================
+        def angle_between(p1, p2, p3):
+            v1 = np.array(p1) - np.array(p2)
+            v2 = np.array(p3) - np.array(p2)
+            n1 = np.linalg.norm(v1)
+            n2 = np.linalg.norm(v2)
+            if n1 < 1e-6 or n2 < 1e-6: return 180.0
+            cos_ang = np.dot(v1, v2) / (n1 * n2)
+            cos_ang = np.clip(cos_ang, -1.0, 1.0)
+            return np.degrees(np.arccos(cos_ang))
+
         def filter_short(lines, ml=100.0):
             return [l for l in lines if l.length >= ml]
 
@@ -670,7 +671,6 @@ class UltimateShipAnalyzer(QMainWindow):
                 result.append({'line': LineString(mids), 'thickness': round(dist * 2) / 2.0})
             return result
 
-        # 긴 선(Long Line)을 통째로 오프셋하여 단일 중심선 생성
         def create_continuous_stiffener_centerlines(pairs):
             long_line_map = {}
             for short_line, long_line, (ov_s, ov_e), dist in pairs:
@@ -897,13 +897,9 @@ class UltimateShipAnalyzer(QMainWindow):
             return new_centerlines
 
         try:
-            # 기본 하중 변수 설정
             self.raw_swbm = float(self.txt_swbm.text())
             self.raw_shear = float(self.txt_shear_v.text())
 
-            # =============================================================
-            # 베이스라인 정렬 (1999 레이어의 가장 낮은 위치를 0으로)
-            # =============================================================
             y_mins = []
             input_thks = []
             for i, l_seg in enumerate(self.left_1999_segments):
@@ -923,9 +919,6 @@ class UltimateShipAnalyzer(QMainWindow):
             c9001 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_9001]
             l1999s = [affinity.translate(l, yoff=-thickness_y_min) for l in self.left_1999_segments]
 
-            # =============================================================
-            # 1D 추출 파이프라인 (메인 선체 폐루프 검출)
-            # =============================================================
             progress.setLabelText("Step 1: Loading layers...")
             QApplication.processEvents()
 
@@ -966,7 +959,6 @@ class UltimateShipAnalyzer(QMainWindow):
             for cl in cl157: cl['type'] = '157'
             cl1999 = [l for l in l1999f if l['line'].length > 100.0 or l.get('is_bridge', False)]
             
-            # 메인 선체(157, 1999, -1102) 네트워크
             all_cl = cl1999 + cl1102 + cl157
 
             progress.setLabelText("Step 7: Ray-casting (≤100mm)...")
@@ -999,88 +991,228 @@ class UltimateShipAnalyzer(QMainWindow):
 
             raw_loops = list(polygonize(planarized_network))
             self.mesh_cells = [poly for poly in raw_loops if poly.area >= 100.0]
-            
-            # =================================================================
-            # [요청 반영] 폐단면의 꼭짓점 포인트(Cell Points) 추출
-            # 중간(Collinear) 좌표 제거, 구조적 노드(교차, 두께 변경점) 유지
-            # =================================================================
-            self.cell_points = []
-            pts = set()
-            
-            if self.mesh_cells:
-                # 1D 네트워크(메인 선체)의 실제 노드만 추출 (중간점 필터링용)
-                hull_nodes = set()
-                for cl in all_cl:
-                    coords = list(cl['line'].coords)
-                    hull_nodes.add((round(coords[0][0], 2), round(coords[0][1], 2)))
-                    hull_nodes.add((round(coords[-1][0], 2), round(coords[-1][1], 2)))
-                    
-                def is_corner(p1, p2, p3):
-                    v1 = np.array(p1) - np.array(p2)
-                    v2 = np.array(p3) - np.array(p2)
-                    n1 = np.linalg.norm(v1)
-                    n2 = np.linalg.norm(v2)
-                    if n1 < 1e-6 or n2 < 1e-6: return False
-                    cos_ang = np.dot(v1, v2) / (n1 * n2)
-                    cos_ang = np.clip(cos_ang, -1.0, 1.0)
-                    ang = np.degrees(np.arccos(cos_ang))
-                    return abs(ang - 180.0) > 1.0  # 1도 이상 꺾이면 코너로 인정
 
-                for poly in self.mesh_cells:
-                    coords = list(poly.exterior.coords)
-                    n_c = len(coords)
-                    if n_c < 4:
-                        for c in coords:
-                            pts.add((round(c[0], 2), round(c[1], 2)))
-                        continue
-                        
-                    for i in range(n_c - 1):
-                        p_curr = coords[i]
-                        p_prev = coords[i - 1]
-                        p_next = coords[i + 1] if i + 1 < n_c else coords[1]
-                        
-                        pt_key = (round(p_curr[0], 2), round(p_curr[1], 2))
-                        
-                        # 1. 기하학적인 모서리이거나
-                        # 2. 원래 네트워크상에서 쪼개진 '진짜 구조적 노드'인 경우만 추가
-                        if is_corner(p_prev, p_curr, p_next) or pt_key in hull_nodes:
-                            pts.add(pt_key)
+            # =============================================================
+            # [최종 수정됨] Step 10.5: 메인 선체 전단류 경로 할당 및 꼭짓점 슬릿 지정
+            # 열린 끝단(degree=1) 추적 및 배제 -> 스패닝 트리 형성 -> 방향 쏟아붓기
+            # =============================================================
+            progress.setLabelText("Step 10.5: 전단류 경로 할당 및 슬릿 노드 판별...")
+            QApplication.processEvents()
             
-            # [추가 요청 반영] 1999 레이어의 두께가 바뀌는 지점을 강제로 찾아 노드로 추가
-            # unary_union 과정에서 1999 직선 구간이 병합되어 노드가 누락되는 것을 방지
-            p_1999_dict = defaultdict(set)
+            def pt_key(coord): return (round(coord[0], 2), round(coord[1], 2))
+
+            node_pos = {}
+            seen_edges = set()
+            edge_info_map = {}
+            adj = defaultdict(list)
+            edge_idx = 0
+
             for cl in all_cl:
-                if cl.get('type') == '1999':
-                    c_line = list(cl['line'].coords)
-                    thk = cl.get('thickness', 10.0)
-                    p_1999_dict[(round(c_line[0][0], 2), round(c_line[0][1], 2))].add(thk)
-                    p_1999_dict[(round(c_line[-1][0], 2), round(c_line[-1][1], 2))].add(thk)
+                coords = list(cl['line'].coords)
+                for i in range(len(coords) - 1):
+                    p1 = coords[i]
+                    p2 = coords[i+1]
+                    k1, k2 = pt_key(p1), pt_key(p2)
+                    if k1 == k2: continue
+                        
+                    ekey = tuple(sorted([k1, k2]))
+                    if ekey in seen_edges: continue
+                    seen_edges.add(ekey)
+
+                    node_pos[k1], node_pos[k2] = p1, p2
+                    adj[k1].append((k2, edge_idx))
+                    adj[k2].append((k1, edge_idx))
+                    edge_info_map[edge_idx] = {
+                        'u': k1, 'v': k2, 'thk': cl.get('thickness', 10.0), 'type': cl.get('type', '')
+                    }
+                    edge_idx += 1
+
+            # 논리적 꼭짓점(Vertices)과 일직선 중간점(T-nodes) 분리
+            vertices = set()
+            for k, neighbors in adj.items():
+                if len(neighbors) != 2:
+                    vertices.add(k)
+                else:
+                    n1_k, n2_k = neighbors[0][0], neighbors[1][0]
+                    t1, t2 = edge_info_map[neighbors[0][1]]['type'], edge_info_map[neighbors[1][1]]['type']
+                    if t1 == '1999' and t2 == '1999':
+                        pass # 1999 곡선부는 무조건 통과점
+                    else:
+                        ang = angle_between(node_pos[n1_k], node_pos[k], node_pos[n2_k])
+                        if abs(ang - 180.0) > 1.0: vertices.add(k)
+
+            # 매크로 엣지 압축
+            macro_edges = {}
+            visited_sub_edges = set()
+            m_adj = defaultdict(list)
+            m_idx = 0
+            
+            for v in vertices:
+                for nxt, e_idx in adj[v]:
+                    if e_idx in visited_sub_edges: continue
                     
-            for pt_key, thks in p_1999_dict.items():
-                if len(thks) > 1: # 두 가지 이상의 두께가 만나는 점 (두께 변경점)
-                    pts.add(pt_key)
+                    path_nodes, path_edges = [v], []
+                    curr, curr_e = nxt, e_idx
+                    
+                    while True:
+                        path_nodes.append(curr)
+                        path_edges.append(curr_e)
+                        visited_sub_edges.add(curr_e)
+                        
+                        if curr in vertices: break
+                            
+                        next_neighbors = [n for n in adj[curr] if n[1] != curr_e]
+                        if not next_neighbors: break
+                        curr, curr_e = next_neighbors[0]
+                        
+                    end_v = path_nodes[-1]
+                    macro_edges[m_idx] = {
+                        'start_v': v, 'end_v': end_v, 'path_nodes': path_nodes,
+                        'sub_edges': path_edges, 'idx': m_idx
+                    }
+                    m_adj[v].append(m_idx)
+                    m_adj[end_v].append(m_idx)
+                    m_idx += 1
 
-            self.cell_points = list(pts)
+            # -------------------------------------------------------------
+            # [추가됨] 열린 끝단(Free Ends, degree=1) 재귀적 트리밍 
+            # 루프에 속하지 않는 모든 잔가지들을 active_v에서 제외하여 계산 대상에서 배제
+            # -------------------------------------------------------------
+            active_v = set(vertices)
+            active_m_edges = set(macro_edges.keys())
+            
+            while True:
+                removed_any = False
+                for v in list(active_v):
+                    active_incident = [e for e in m_adj[v] if e in active_m_edges]
+                    if len(active_incident) <= 1:
+                        active_v.remove(v)
+                        if active_incident: active_m_edges.remove(active_incident[0])
+                        removed_any = True
+                if not removed_any: break
 
-            self.dialog_loop = LoopViewerDialog(all_cl, self.mesh_cells, self)
-            self.dialog_loop.show()
-            self.debug_dialogs.append(self.dialog_loop)
+            # 잔가지가 다듬어진 진짜 교차점들만 cell_point로 최종 확정
+            self.cell_points = [node_pos[v] for v in active_v]
+
+            # -------------------------------------------------------------
+            # 스패닝 트리 (루프 컷팅을 위한 가상 슬릿 선행 배정)
+            # -------------------------------------------------------------
+            tree_m_edges = set()
+            visited_v = set()
+            dist = {}
+            
+            # 여러 개의 닫힌 구조가 있을 수 있으므로 Y축 기준 순회
+            sorted_active_v = sorted(list(active_v), key=lambda k: node_pos[k][1], reverse=True)
+            
+            for root_v in sorted_active_v:
+                if root_v not in visited_v:
+                    queue = [(root_v, 0)]
+                    visited_v.add(root_v)
+                    dist[root_v] = 0
+                    
+                    while queue:
+                        curr, d = queue.pop(0)
+                        active_neighbors = []
+                        for e_idx in m_adj[curr]:
+                            if e_idx in active_m_edges:
+                                me = macro_edges[e_idx]
+                                nxt = me['end_v'] if me['start_v'] == curr else me['start_v']
+                                active_neighbors.append((nxt, e_idx))
+                                
+                        for nxt, e_idx in active_neighbors:
+                            if nxt not in visited_v:
+                                visited_v.add(nxt)
+                                tree_m_edges.add(e_idx)
+                                dist[nxt] = d + 1
+                                queue.append((nxt, d + 1))
+
+            # -------------------------------------------------------------
+            # 방향 배분 및 역방향 필터링
+            # -------------------------------------------------------------
+            self.directed_segments = []
+            self.undirected_segments = []
+            
+            temp_directed_segments = []
+            in_degree = defaultdict(int)
+            out_degree = defaultdict(int)
+
+            for e_idx, me in macro_edges.items():
+                u, v = me['start_v'], me['end_v']
+                mid_pos_list = [node_pos[mk] for mk in me['path_nodes'][1:-1]]
+                
+                # 잘려나간 잔가지 (Free Ends) -> 방향 없음
+                if e_idx not in active_m_edges:
+                    self.undirected_segments.append({
+                        'start_pos': node_pos[u], 'end_pos': node_pos[v],
+                        'mid_pos_list': mid_pos_list, 'sub_edges': me['sub_edges']
+                    })
+                    continue
+                    
+                # 루프에 속한 활성 엣지 -> 거리 기반 일방향 배분 (BFS 하향식 쏟아붓기)
+                d_u, d_v = dist.get(u, 0), dist.get(v, 0)
+                if d_u < d_v:
+                    start, end = u, v
+                elif d_u > d_v:
+                    start, end = v, u
+                else:
+                    start, end = (u, v) if u[0] < v[0] else (v, u)
+                    
+                # 트리 엣지가 아니면 가상 슬릿임 (is_slit = True)
+                is_slit = e_idx not in tree_m_edges
+                
+                # Start/End 표시는 오직 '실제 흐름(Tree edge)'에만 기여함
+                if not is_slit:
+                    out_degree[start] += 1
+                    in_degree[end] += 1
+                    
+                temp_directed_segments.append({
+                    'start_node': start, 'end_node': end,
+                    'start_pos': node_pos[start], 'end_pos': node_pos[end],
+                    'mid_pos_list': mid_pos_list if start == u else mid_pos_list[::-1],
+                    'is_slit': is_slit, 'sub_edges': me['sub_edges']
+                })
+
+            # 방향 중복/상쇄 필터링
+            path_signatures = {}
+            to_remove = set()
+            for i, seg in enumerate(temp_directed_segments):
+                sig_list = [seg['start_node']] + [pt_key(mp) for mp in seg.get('mid_pos_list', [])] + [seg['end_node']]
+                sig = tuple(sig_list)
+                rev_sig = tuple(sig_list[::-1])
+                if rev_sig in path_signatures:
+                    to_remove.add(path_signatures[rev_sig])
+                    to_remove.add(i)
+                else:
+                    path_signatures[sig] = i
+                    
+            self.directed_segments = [s for i, s in enumerate(temp_directed_segments) if i not in to_remove]
+
+            # -------------------------------------------------------------
+            # 노드 단위 슬릿 판별 (단독 Start 혹은 단독 End 증명)
+            # -------------------------------------------------------------
+            self.slit_nodes = []
+            for v in active_v:
+                ind = in_degree[v]
+                outd = out_degree[v]
+                
+                # 들어오기만 하거나(End 단독) 나가기만 하는(Start 단독) 노드를 슬릿으로 지정
+                if (ind > 0 or outd > 0) and (ind == 0 or outd == 0):
+                    self.slit_nodes.append({
+                        'node': v,
+                        'pos': node_pos[v],
+                        'type': 'Source' if outd > 0 else 'Sink'
+                    })
 
 
             # =============================================================
-            # 보강재 필터링 로직 (메인 선체와 맞닿은 부분만 형성)
+            # 이후 보강재(Stiffener) 추출 및 1D Inertia 연산을 위해 centerlines 생성
             # =============================================================
             progress.setLabelText("Step 11: 종골재(Stiffener) 1D 추출 및 공간 인덱싱 병합 중...")
             QApplication.processEvents()
 
             raw_stiffs = c6001 + c7001 + c8001 + c9001
-
             stiff_f1 = filter_short(raw_stiffs, 20.0)
             stiff_f2 = remove_overlapping(stiff_f1, dt=1.0)
-
-            self.dialog_stiff1 = StiffenerFilterDialog(raw_stiffs, stiff_f2, self)
-            self.dialog_stiff1.show()
-            self.debug_dialogs.append(self.dialog_stiff1)
 
             stiff_s = []
             for l in stiff_f2: stiff_s.extend(split_by_slope(l, at=5.0)) 
@@ -1088,10 +1220,6 @@ class UltimateShipAnalyzer(QMainWindow):
             
             stiff_cl = create_continuous_stiffener_centerlines(stiff_pairs)
             for c in stiff_cl: c['type'] = 'stiffener'
-
-            self.dialog_stiff2 = StiffenerCenterlineDialog(stiff_f2, stiff_cl, self)
-            self.dialog_stiff2.show()
-            self.debug_dialogs.append(self.dialog_stiff2)
 
             target_lines = all_cl 
             healed_stiff_cl = []
@@ -1155,10 +1283,6 @@ class UltimateShipAnalyzer(QMainWindow):
             all_combined_cl = all_cl + healed_stiff_cl
             all_combined_cl = split_all_lines_at_intersections(all_combined_cl)
 
-            self.dialog_stiff3 = StiffenerHealDialog(all_cl, stiff_cl, healed_stiff_cl, self)
-            self.dialog_stiff3.show()
-            self.debug_dialogs.append(self.dialog_stiff3)
-
             self.centerlines = all_combined_cl
             raw_endpoints_set = set()
             for cl in self.centerlines:
@@ -1180,7 +1304,6 @@ class UltimateShipAnalyzer(QMainWindow):
                 thk = cl.get('thickness', 10.0)
                 if thk <= 0: thk = 10.0
                 
-                # 여러 마디로 꺾여있을 수 있으므로 각 선분 단위로 연산
                 for i in range(len(coords) - 1):
                     x1, y1 = coords[i]
                     x2, y2 = coords[i+1]
@@ -1197,9 +1320,7 @@ class UltimateShipAnalyzer(QMainWindow):
                 na_1d = qx_1d_total / a_1d_total
                 ixx_1d = 0.0
                 for a, yc, dy in segments_1d:
-                    # 1D 선분의 국부 관성모멘트 I = (Area * dy^2) / 12
                     i_local = (a * (dy ** 2)) / 12.0
-                    # 평행축 정리 적용
                     ixx_1d += i_local + a * ((yc - na_1d) ** 2)
                     
                 all_1d_y = [p[1] for cl in self.centerlines for p in cl['line'].coords]
@@ -1215,7 +1336,6 @@ class UltimateShipAnalyzer(QMainWindow):
             else:
                 na_1d = ixx_1d = depth_1d = na_bl_1d = z_top_1d = z_btm_1d = 0.0
 
-            # 산출된 1D 결과값을 기존 멤버 변수(Excel Export용 등)에 오버라이드
             self.calc_total_area = a_1d_total
             self.calc_ixx = ixx_1d
             self.calc_depth = depth_1d
@@ -1247,7 +1367,10 @@ class UltimateShipAnalyzer(QMainWindow):
             res += f"  1102 (paired)  : {len(cl1102)}\n"
             res += f"  Stiffeners     : {len(healed_stiff_cl)}\n"
             res += f"Detected Cells   : {len(self.mesh_cells)} (Closed Loops)\n"
-            res += f"Cell Points      : {len(self.cell_points)} (Vertices)\n"
+            res += f"Cell Points      : {len(self.cell_points)} (Vertices, No Free Ends)\n"
+            res += f"Shear Segments   : {len(self.directed_segments)} (Active Paths)\n"
+            res += f"Free Segments    : {len(self.undirected_segments)} (Dead Ends)\n"
+            res += f"Slit Nodes       : {len(self.slit_nodes)} (Loop Cuts)\n"
 
             self.base_report = res
             self.result_box.setText(self.base_report)
@@ -1258,6 +1381,12 @@ class UltimateShipAnalyzer(QMainWindow):
             progress.setMaximum(0)
             QApplication.processEvents()
             self.refresh_ui()
+
+            # 계산이 끝나면 가상 슬릿 팝업 띄우기
+            if self.directed_segments or self.undirected_segments:
+                self.dialog_shear_flow = ShearFlowPathDialog(self.directed_segments, self.undirected_segments, self.slit_nodes, self)
+                self.dialog_shear_flow.show()
+                self.debug_dialogs.append(self.dialog_shear_flow)
 
         except UserWarning as uw:
             self.result_box.setText(f"⚠️ {str(uw)}")
@@ -1569,9 +1698,6 @@ class UltimateShipAnalyzer(QMainWindow):
         self.shell_thickness_inputs.clear()
 
         if self.is_calculated:
-            # =================================================================
-            # ax1: Cross Section View (1D 선분 및 두께만 표현, 노드 표시 안 함)
-            # =================================================================
             if self.centerlines:
                 for cl in self.centerlines:
                     lo = cl['line']
@@ -1597,9 +1723,6 @@ class UltimateShipAnalyzer(QMainWindow):
                             pass
                     ax1.plot(x, y, color=color, linewidth=2.5, alpha=0.9, zorder=10, linestyle='-')
 
-            # =================================================================
-            # ax2: 폐단면(Cells) 및 꼭짓점(Points) 표현
-            # =================================================================
             if hasattr(self, 'mesh_cells') and self.mesh_cells:
                 cmap = matplotlib.colormaps.get_cmap('tab20')
                 for idx, poly in enumerate(self.mesh_cells):
