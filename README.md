@@ -105,7 +105,7 @@ class StiffenerHealDialog(QDialog):
 
 
 # =========================================================================
-# [code 2] 폐단면 검출 디버깅 다이얼로그 (유지)
+# [code 2] 폐단면 검출 디버깅 다이얼로그
 # =========================================================================
 class LoopViewerDialog(QDialog):
     def __init__(self, centerlines, loops, parent=None):
@@ -172,6 +172,7 @@ class UltimateShipAnalyzer(QMainWindow):
         self.lines_157 = []
         self.lines_6001 = []
         self.lines_7001 = []
+        self.lines_8001 = []  # 8001 레이어 변수 추가
         self.lines_9001 = []
         self.lines_minus1204 = []
         self.hull_centroid = Point(0, 0)
@@ -201,9 +202,6 @@ class UltimateShipAnalyzer(QMainWindow):
             d.close()
         self.debug_dialogs.clear()
 
-    # =====================================================================
-    # UI 구성 (엄격 유지)
-    # =====================================================================
     def init_ui(self):
         main_scroll = QScrollArea()
         main_scroll.setWidgetResizable(True)
@@ -375,9 +373,6 @@ class UltimateShipAnalyzer(QMainWindow):
     def on_section_changed(self, text):
         self.combo_hull.setEnabled(text == "Discontinuous")
 
-    # =====================================================================
-    # DXF 유틸리티
-    # =====================================================================
     def _extract_pts(self, e, scale):
         try:
             if e.dxftype() == 'LINE':
@@ -535,7 +530,7 @@ class UltimateShipAnalyzer(QMainWindow):
             msp = doc.modelspace()
             active_layers = {l.dxf.name for l in doc.layers if l.is_on() and not l.is_frozen()}
             t_1999, t_1204 = [], []
-            t_layers = {"-1102": [], "157": [], "6001": [], "7001": [], "9001": []}
+            t_layers = {"-1102": [], "157": [], "6001": [], "7001": [], "8001": [], "9001": []}
 
             for e in msp:
                 layer = e.dxf.layer.strip()
@@ -576,6 +571,7 @@ class UltimateShipAnalyzer(QMainWindow):
             self.lines_157 = [shift(ls) for ls in t_layers["157"]]
             self.lines_6001 = [shift(ls) for ls in t_layers["6001"]]
             self.lines_7001 = [shift(ls) for ls in t_layers["7001"]]
+            self.lines_8001 = [shift(ls) for ls in t_layers["8001"]]
             self.lines_9001 = [shift(ls) for ls in t_layers["9001"]]
 
             self.refresh_ui()
@@ -584,7 +580,7 @@ class UltimateShipAnalyzer(QMainWindow):
             self.result_box.setText(f"❌ Load Error Detailed:\n{traceback.format_exc()}")
 
     # =====================================================================
-    # 메인 계산
+    # 메인 계산 (최적화 적용부)
     # =====================================================================
     def calculate_total_inertia(self):
         if self.is_processing: return
@@ -608,6 +604,7 @@ class UltimateShipAnalyzer(QMainWindow):
         def remove_overlapping(lines, dt=10.0, at=5.0):
             lines = sorted(lines, key=lambda x: x.length, reverse=True)
             kept = []
+            kept_meta = []
             for l in lines:
                 c = list(l.coords)
                 ps, pe = np.array(c[0]), np.array(c[-1])
@@ -616,13 +613,8 @@ class UltimateShipAnalyzer(QMainWindow):
                 if ln < 1e-6: continue
                 ang = np.degrees(np.arctan2(v[1], v[0])) % 180
                 dup = False
-                for k in kept:
-                    ck = list(k.coords)
-                    pk1, pk2 = np.array(ck[0]), np.array(ck[-1])
-                    vk = pk2 - pk1
-                    lk = np.linalg.norm(vk)
-                    if lk < 1e-6: continue
-                    ak = np.degrees(np.arctan2(vk[1], vk[0])) % 180
+                for km in kept_meta:
+                    ak, pk1, vk, lk = km['ang'], km['ps'], km['v'], km['ln']
                     if min(abs(ang - ak), 180 - abs(ang - ak)) > at: continue
                     vu = vk / lk
                     mid = (ps + pe) / 2.0
@@ -630,7 +622,9 @@ class UltimateShipAnalyzer(QMainWindow):
                     t1, t2 = np.dot(ps - pk1, vu), np.dot(pe - pk1, vu)
                     if min(lk, max(t1, t2)) - max(0, min(t1, t2)) > ln * 0.8:
                         dup = True; break
-                if not dup: kept.append(l)
+                if not dup:
+                    kept.append(l)
+                    kept_meta.append({'ang': ang, 'ps': ps, 'v': v, 'ln': ln})
             return kept
 
         def split_by_slope(line, at=5.0):
@@ -663,18 +657,31 @@ class UltimateShipAnalyzer(QMainWindow):
                 ln = np.linalg.norm(v)
                 if ln < 1e-6:
                     meta.append(None); continue
+                minx, miny = min(ps[0], pe[0]), min(ps[1], pe[1])
+                maxx, maxy = max(ps[0], pe[0]), max(ps[1], pe[1])
                 meta.append({'ps': ps, 'pe': pe, 'v': v, 'ln': ln,
                              'unit': v / ln, 'ang': np.degrees(np.arctan2(v[1], v[0])) % 180,
-                             'mid': (ps + pe) / 2.0})
+                             'mid': (ps + pe) / 2.0, 
+                             'minx': minx, 'miny': miny, 'maxx': maxx, 'maxy': maxy})
             used = {i: [] for i in range(len(ls_sorted))}
             pairs = []
             for i in range(len(ls_sorted)):
                 if meta[i] is None: continue
                 mi = meta[i]
                 best_j, best_d, best_ov = -1, float('inf'), None
+                mi_expand_minx = mi['minx'] - max_dist
+                mi_expand_maxx = mi['maxx'] + max_dist
+                mi_expand_miny = mi['miny'] - max_dist
+                mi_expand_maxy = mi['maxy'] + max_dist
+                
                 for j in range(i + 1, len(ls_sorted)):
                     if meta[j] is None: continue
                     mj = meta[j]
+                    
+                    if (mj['maxx'] < mi_expand_minx or mj['minx'] > mi_expand_maxx or
+                        mj['maxy'] < mi_expand_miny or mj['miny'] > mi_expand_maxy):
+                        continue
+                        
                     ad = min(abs(mi['ang'] - mj['ang']), 180 - abs(mi['ang'] - mj['ang']))
                     if ad > angle_tol: continue
                     proj_infinite = mj['ps'] + np.dot(mi['mid'] - mj['ps'], mj['unit']) * mj['unit']
@@ -716,9 +723,55 @@ class UltimateShipAnalyzer(QMainWindow):
                 result.append({'line': LineString(mids), 'thickness': round(dist * 2) / 2.0})
             return result
 
+        # [핵심 변경부 1] 짧은 분절이 아닌 긴 선(Long Line)을 통째로 오프셋하여 단일 중심선 생성
+        def create_continuous_stiffener_centerlines(pairs):
+            long_line_map = {}
+            for short_line, long_line, (ov_s, ov_e), dist in pairs:
+                idx = id(long_line)
+                if idx not in long_line_map:
+                    long_line_map[idx] = {'long_line': long_line, 'shorts': [], 'dist': dist}
+                long_line_map[idx]['shorts'].append(short_line)
+
+            result = []
+            for data in long_line_map.values():
+                ll = data['long_line']
+                dist = data['dist']
+                shorts = data['shorts']
+                
+                cl_c = list(ll.coords)
+                p1, p2 = np.array(cl_c[0]), np.array(cl_c[-1])
+                v = p2 - p1
+                length = np.linalg.norm(v)
+                if length < 1e-6: continue
+                vu = v / length
+                
+                # 짧은 선들의 중심점을 샘플링하여 오프셋 방향 도출
+                sl = shorts[0]
+                sc = list(sl.coords)
+                ps_mid = (np.array(sc[0]) + np.array(sc[-1])) / 2.0
+                pl_mid = (p1 + p2) / 2.0
+                
+                vec = ps_mid - pl_mid
+                proj = np.dot(vec, vu) * vu
+                perp = vec - proj
+                perp_len = np.linalg.norm(perp)
+                
+                if perp_len < 1e-6:
+                    n = np.array([-vu[1], vu[0]])
+                else:
+                    n = perp / perp_len
+                    
+                offset = n * (dist / 2.0)
+                new_coords = [tuple(np.array(pt) + offset) for pt in cl_c]
+                result.append({'line': LineString(new_coords), 'thickness': round(dist * 2) / 2.0})
+                
+            return result
+
         def raycast_extend(centerlines, max_dist=100.0):
             extended_pts = []
             result = []
+            bounds = [cl['line'].bounds for cl in centerlines]
+            
             for i, cl in enumerate(centerlines):
                 coords = list(cl['line'].coords)
                 if len(coords) < 2:
@@ -730,18 +783,28 @@ class UltimateShipAnalyzer(QMainWindow):
                     vn = np.linalg.norm(v)
                     if vn < 1e-6: continue
                     d = v / vn
+                    
                     conn = False
                     for j, o in enumerate(centerlines):
                         if i == j: continue
+                        ob = bounds[j]
+                        if ob[2] < p[0]-5.0 or ob[0] > p[0]+5.0 or ob[3] < p[1]-5.0 or ob[1] > p[1]+5.0:
+                            continue
                         for op in [list(o['line'].coords)[0], list(o['line'].coords)[-1]]:
                             if np.linalg.norm(p - np.array(op)) < 5.0:
                                 conn = True; break
                         if conn: break
                     if conn: continue
+                    
                     ray = LineString([tuple(p), tuple(p + d * max_dist)])
+                    rb = ray.bounds
                     bp, bd = None, max_dist
                     for j, o in enumerate(centerlines):
                         if i == j: continue
+                        ob = bounds[j]
+                        if rb[2] < ob[0] or rb[0] > ob[2] or rb[3] < ob[1] or rb[1] > ob[3]:
+                            continue
+                        
                         inter = ray.intersection(o['line'])
                         if inter.is_empty: continue
                         pts = [inter] if inter.geom_type == 'Point' else \
@@ -784,9 +847,13 @@ class UltimateShipAnalyzer(QMainWindow):
             for i, e1 in enumerate(open_eps):
                 if i in matched: continue
                 bj, bd = -1, float('inf')
+                p1 = e1['pt']
                 for j, e2 in enumerate(open_eps):
                     if j <= i or j in matched or e1['idx'] == e2['idx']: continue
-                    d = np.linalg.norm(e1['pt'] - e2['pt'])
+                    p2 = e2['pt']
+                    if abs(p1[0] - p2[0]) > max_gap or abs(p1[1] - p2[1]) > max_gap:
+                        continue
+                    d = np.linalg.norm(p1 - p2)
                     if 0.1 < d <= max_gap and d < bd:
                         bd = d; bj = j
                 if bj >= 0:
@@ -835,9 +902,15 @@ class UltimateShipAnalyzer(QMainWindow):
 
         def split_all_lines_at_intersections(centerlines):
             all_line_geoms = [cl['line'] for cl in centerlines]
+            bounds = [g.bounds for g in all_line_geoms] 
             intersection_points = []
+            
             for i in range(len(all_line_geoms)):
+                b1 = bounds[i]
                 for j in range(i + 1, len(all_line_geoms)):
+                    b2 = bounds[j]
+                    if b1[2] < b2[0] or b1[0] > b2[2] or b1[3] < b2[1] or b1[1] > b2[3]:
+                        continue
                     try:
                         inter = all_line_geoms[i].intersection(all_line_geoms[j])
                         if inter.is_empty: continue
@@ -908,6 +981,7 @@ class UltimateShipAnalyzer(QMainWindow):
             self.lines_157 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_157]
             self.lines_6001 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_6001]
             self.lines_7001 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_7001]
+            self.lines_8001 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_8001]
             self.lines_9001 = [affinity.translate(l, yoff=-thickness_y_min) for l in self.lines_9001]
             self.raw_1999_lines = [affinity.translate(l, yoff=-thickness_y_min) for l in self.raw_1999_lines]
 
@@ -916,7 +990,7 @@ class UltimateShipAnalyzer(QMainWindow):
             l1999s = [affinity.translate(l, yoff=-thickness_y_min) for l in self.left_1999_segments]
 
             ext, perp = float(self.txt_ext.text()), float(self.txt_perp.text())
-            all_internal_lines = self.lines_1102 + self.lines_157 + self.lines_6001 + self.lines_7001 + self.lines_9001
+            all_internal_lines = self.lines_1102 + self.lines_157 + self.lines_6001 + self.lines_7001 + self.lines_8001 + self.lines_9001
             internal_polys = self.apply_original_algorithm(all_internal_lines, self.raw_1999_lines, ext, perp,
                                                            0.5 * 1e6) if all_internal_lines else []
 
@@ -1013,7 +1087,6 @@ class UltimateShipAnalyzer(QMainWindow):
 
             all_cl = split_all_lines_at_intersections(all_cl)
 
-            # Step 10: 메인 선체 폐루프(Cell) 검출 및 팝업
             progress.setLabelText("Step 10: Detecting closed loops (Cells)...")
             QApplication.processEvents()
 
@@ -1034,37 +1107,39 @@ class UltimateShipAnalyzer(QMainWindow):
 
 
             # =============================================================
-            # [신규 추가] 보강재(6001, 7001, 9001) 1D 추출 및 오버레이
+            # [핵심 변경부 2] 보강재(6001, 7001, 8001, 9001) 추출 및 STRtree 적용
             # =============================================================
-            progress.setLabelText("Step 11: 종골재(Stiffener) 1D 추출 중...")
+            progress.setLabelText("Step 11: 종골재(Stiffener) 1D 추출 및 공간 인덱싱 병합 중...")
             QApplication.processEvents()
 
-            raw_stiffs = self.lines_6001 + self.lines_7001 + self.lines_9001
+            raw_stiffs = self.lines_6001 + self.lines_7001 + self.lines_8001 + self.lines_9001
 
-            # 1. 사전 필터링 (20mm 이하 및 중첩 제거)
             stiff_f1 = filter_short(raw_stiffs, 20.0)
             stiff_f2 = remove_overlapping(stiff_f1, dt=1.0)
 
-            # [디버깅 팝업 1] 보강재 필터링 확인
             self.dialog_stiff1 = StiffenerFilterDialog(raw_stiffs, stiff_f2, self)
             self.dialog_stiff1.show()
             self.debug_dialogs.append(self.dialog_stiff1)
 
-            # 2. 중심선 도출
             stiff_s = []
-            for l in stiff_f2: stiff_s.extend(split_by_slope(l, at=5.0)) # 굴곡진 보강재 대응
+            for l in stiff_f2: stiff_s.extend(split_by_slope(l, at=5.0)) 
             stiff_pairs = match_pairs(stiff_s, max_dist=50.0, angle_tol=20.0, overlap_tolerance=5.0)
-            stiff_cl = create_centerlines(stiff_pairs)
+            
+            # 여기서 긴 선을 기준으로 하는 단일 연속 중심선 함수를 호출합니다.
+            stiff_cl = create_continuous_stiffener_centerlines(stiff_pairs)
             for c in stiff_cl: c['type'] = 'stiffener'
 
-            # [디버깅 팝업 2] 보강재 중심선 확인
             self.dialog_stiff2 = StiffenerCenterlineDialog(stiff_f2, stiff_cl, self)
             self.dialog_stiff2.show()
             self.debug_dialogs.append(self.dialog_stiff2)
 
-            # 3. L/T 조인트 빈 공간 간극 치유 (열린 노드 반경 10mm 레이캐스팅 및 스냅)
+            # L/T 조인트 간극 치유 (STRtree를 이용한 O(1) 수준 초고속 연산)
             target_lines = all_cl + stiff_cl
             healed_stiff_cl = []
+            
+            # Shapely의 STRtree를 생성합니다. (내부 GEOS C 라이브러리 활용)
+            target_geoms = [o['line'] for o in target_lines]
+            tree = STRtree(target_geoms)
 
             for cl in stiff_cl:
                 coords = list(cl['line'].coords)
@@ -1076,44 +1151,59 @@ class UltimateShipAnalyzer(QMainWindow):
                     if vn < 1e-6: continue
                     d = v / vn
 
-                    # 노드가 열려있는지(Open Node) 확인 (다른 선에 안 닿아있음)
+                    p_point = Point(p)
+                    
+                    # [최적화] 1. STRtree 기반 1e-3 초근접 노드 검사 (열린 노드 판별)
+                    res_open = tree.query(p_point.buffer(1e-3))
+                    # Shapely 1.8과 2.0 버전에 대한 출력 결과 호환성을 모두 보장합니다.
+                    if len(res_open) > 0 and isinstance(res_open[0], (int, np.integer)):
+                        close_1e3 = [target_geoms[i] for i in res_open]
+                    else:
+                        close_1e3 = list(res_open)
+                        
                     is_open = True
-                    for o in target_lines:
-                        if o['line'] == cl['line']: continue
-                        if o['line'].distance(Point(p)) < 1e-3:
+                    for cg in close_1e3:
+                        if cg == cl['line']: continue
+                        if cg.distance(p_point) < 1e-3:
                             is_open = False; break
 
-                    # 열려있다면 반경 10mm 이내 인접 선분 스캔 후 레이캐스팅
+                    # [최적화] 2. 노드가 열려있을 때만, 반경 10.0 내부 요소 트리 검색 후 교차 시뮬레이션
                     if is_open:
-                        close_lines = [o for o in target_lines if o['line'] != cl['line'] and o['line'].distance(Point(p)) <= 10.0]
+                        res_10 = tree.query(p_point.buffer(10.0))
+                        if len(res_10) > 0 and isinstance(res_10[0], (int, np.integer)):
+                            close_10 = [target_geoms[i] for i in res_10]
+                        else:
+                            close_10 = list(res_10)
+                            
+                        close_lines = []
+                        for cg in close_10:
+                            if cg == cl['line']: continue
+                            if cg.distance(p_point) <= 10.0:
+                                close_lines.append(cg)
+                                
                         if close_lines:
-                            # 방향 벡터로 30mm 길이의 레이캐스팅 수행
                             ray = LineString([tuple(p), tuple(p + d * 30.0)])
                             bp, bd = None, 30.0
-                            for o in close_lines:
-                                inter = ray.intersection(o['line'])
+                            for cg in close_lines:
+                                inter = ray.intersection(cg)
                                 if not inter.is_empty:
                                     pts = [inter] if inter.geom_type == 'Point' else list(inter.geoms) if inter.geom_type == 'MultiPoint' else []
                                     for pt in pts:
                                         dd = np.linalg.norm(np.array([pt.x, pt.y]) - p)
                                         if dd < bd:
                                             bd = dd; bp = (pt.x, pt.y)
-                            # 교차점을 만났고 반경 10mm 이내라면 노드를 잡아 당김 (Snap)
                             if bp and bd <= 10.0:
                                 if ei == 0: coords[0] = bp
                                 else: coords[-1] = bp
                 healed_stiff_cl.append({'line': LineString(coords), 'thickness': cl['thickness'], 'type': cl['type']})
 
-            # 치유된 보강재를 메인 선체(all_cl)에 오버레이(합치기)
             all_combined_cl = all_cl + healed_stiff_cl
             all_combined_cl = split_all_lines_at_intersections(all_combined_cl)
 
-            # [디버깅 팝업 3] 간극 치유 확인
             self.dialog_stiff3 = StiffenerHealDialog(all_cl, stiff_cl, healed_stiff_cl, self)
             self.dialog_stiff3.show()
             self.debug_dialogs.append(self.dialog_stiff3)
 
-            # 최종 1D 네트워크 구성 완료
             self.centerlines = all_combined_cl
             raw_endpoints_set = set()
             for cl in self.centerlines:
@@ -1488,7 +1578,7 @@ class UltimateShipAnalyzer(QMainWindow):
                     if ct == '1999': color = '#FF00FF'
                     elif ct == '157': color = '#00FFFF'
                     elif ct == '1102': color = '#FFA500'
-                    elif ct == 'stiffener': color = '#008000' # 추가된 종골재
+                    elif ct == 'stiffener': color = '#008000'
                     elif ct == 'bridge': color = '#00CC00'
                     else: color = '#00FF00'
                     thk = cl.get('thickness', 10.0)
